@@ -7,7 +7,7 @@ import secrets
 import tempfile
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import fields
+from dataclasses import dataclass, fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -30,7 +30,11 @@ from research_framework.domain.errors import (
 )
 from research_framework.domain.graph import Edge, GraphSnapshot, Node
 from research_framework.domain.nodes import NodeDraft
-from research_framework.storage.discovery import DiscoveredProject, discover_project
+from research_framework.storage.discovery import (
+    DiscoveredProject,
+    discover_node_files,
+    discover_project,
+)
 from research_framework.storage.loader import load_snapshot
 from research_framework.storage.markdown_codec import DecodedMarkdown, MarkdownCodec
 from research_framework.storage.yaml_codec import dump_restricted_yaml
@@ -60,6 +64,24 @@ _FOLDERS = {
     NodeKind.ARTIFACT: "artifacts",
     NodeKind.DECISION: "decisions",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class FormatResult:
+    """Outcome of checking or applying canonical node serialization."""
+
+    checked_files: int
+    changed_paths: tuple[Path, ...]
+    applied: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _FormatCandidate:
+    path: Path
+    node_id: str
+    original: bytes
+    formatted: bytes
+    revision: str
 
 
 def _ulid() -> str:
@@ -161,7 +183,7 @@ class Project:
         return self._snapshot
 
     def last_diagnostics(self) -> tuple[Diagnostic, ...]:
-        """Diagnostics from the latest mutation when it completed successfully."""
+        """Diagnostics from the latest reporting operation when it succeeded."""
 
         return self._last_diagnostics
 
@@ -173,6 +195,104 @@ class Project:
         from research_framework.validation import validate_project
 
         return validate_project(self.root)
+
+    def format(self, *, check: bool = False) -> FormatResult:
+        """Check or apply canonical YAML front matter across the vault.
+
+        Markdown bodies are copied byte-for-byte. Applying changes is treated as
+        one operation: all outputs are prepared before the first write and prior
+        writes are rolled back if a later write or snapshot refresh fails.
+        """
+
+        self._last_diagnostics = ()
+        diagnostics = self.validate()
+        if any(item.severity is DiagnosticSeverity.ERROR for item in diagnostics):
+            raise ValidationFailed(diagnostics)
+
+        paths = discover_node_files(self._discovered)
+        candidates: list[_FormatCandidate] = []
+        for path in paths:
+            self._safe_target(path)
+            try:
+                original = path.read_bytes()
+            except OSError as error:
+                raise StorageError(
+                    f"cannot read node before formatting: {path}"
+                ) from error
+            try:
+                text = original.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise StorageError(f"node is not valid UTF-8: {path}") from error
+            document = self._codec.decode(text, path=path)
+            formatted = self._codec.encode(document).encode("utf-8")
+            # Prepare and parse every output before touching any destination.
+            self._codec.decode(formatted.decode("utf-8"), path=path)
+            if formatted == original:
+                continue
+            candidates.append(
+                _FormatCandidate(
+                    path=path,
+                    node_id=str(document.metadata.get("id", "unknown")),
+                    original=original,
+                    formatted=formatted,
+                    revision=hashlib.sha256(original).hexdigest(),
+                )
+            )
+
+        result = FormatResult(
+            checked_files=len(paths),
+            changed_paths=tuple(candidate.path for candidate in candidates),
+            applied=not check and bool(candidates),
+        )
+        if check:
+            self._last_diagnostics = diagnostics
+            return result
+
+        written: list[_FormatCandidate] = []
+        try:
+            for candidate in candidates:
+                try:
+                    current = candidate.path.read_bytes()
+                except OSError as error:
+                    raise StorageError(
+                        f"cannot read node before formatting: {candidate.path}"
+                    ) from error
+                actual_revision = hashlib.sha256(current).hexdigest()
+                if actual_revision != candidate.revision:
+                    raise RevisionConflict(
+                        candidate.node_id,
+                        candidate.revision,
+                        actual_revision,
+                    )
+                self._atomic_write_bytes(candidate.path, candidate.formatted)
+                written.append(candidate)
+            self._refresh()
+        except Exception:
+            rollback_errors: list[Exception] = []
+            for candidate in reversed(written):
+                try:
+                    current = candidate.path.read_bytes()
+                    if current != candidate.formatted:
+                        rollback_errors.append(
+                            StorageError(
+                                "refusing to overwrite a concurrent edit while rolling "
+                                f"back formatting: {candidate.path}"
+                            )
+                        )
+                        continue
+                    self._atomic_write_bytes(candidate.path, candidate.original)
+                # Rollback must continue after any individual restoration failure
+                # so that as many original files as possible are recovered.
+                except Exception as rollback_error:  # noqa: BLE001
+                    rollback_errors.append(rollback_error)
+            if rollback_errors:
+                raise StorageError(
+                    "cannot fully roll back failed project formatting"
+                ) from rollback_errors[0]
+            raise
+
+        self._last_diagnostics = diagnostics
+        return result
 
     def _refresh(self) -> None:
         diagnostics = self.validate()

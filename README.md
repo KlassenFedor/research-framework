@@ -29,4 +29,7 @@ Create and inspect a project:
 uv run rf init ./example --title "Example research"
 cd example
 uv run rf validate
+uv run rf format --check
+# Apply canonical YAML front matter formatting when the check reports drift:
+uv run rf format
 ```

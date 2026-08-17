@@ -16,6 +16,7 @@
 | Discovery | Поиск от вложенного пути, границы vault, symlinks, детерминизм |
 | Validation | Syntax, structural, referential, semantic и graph diagnostics |
 | Storage | Candidate prevalidation, atomic write/rollback, revision conflict, локальность diff, защита путей |
+| Formatting | Read-only check, canonical front matter, byte-exact body, idempotence, rollback, concurrent edits |
 | Python API | Init/open, atomic mutations, operation diagnostics, snapshots |
 | CLI | Human/JSON warnings, initial relation flags, stdin, стабильные схемы и exit codes |
 | End-to-end | `init → create → link → reopen → traverse → validate → export` |
@@ -45,10 +46,10 @@
 
 ## Текущий статус
 
-На 2026-08-17 pytest собирает и успешно выполняет 298 сценариев:
+На 2026-08-17 pytest собирает и успешно выполняет 306 сценариев:
 
 ```text
-298 passed
+306 passed
 ```
 
 Дополнительно проходят Ruff, Ruff format check, `compileall`, сборка пакета и

@@ -820,7 +820,27 @@ project.update_node(
 происходит поздний сбой refresh, исходные байты source-файла восстанавливаются
 атомарно.
 
-### 10.5. Ошибки Python API
+### 10.5. Каноническое форматирование
+
+```python
+result = project.format(check=True)
+
+if result.changed_paths:
+    applied = project.format()
+```
+
+`FormatResult` содержит число проверенных Node-файлов, абсолютные пути файлов с
+отличиями и признак фактически применённых изменений. `check=True` никогда не
+пишет на диск. Обычный режим меняет только YAML front matter; Markdown body и
+`PROJECT.md` сохраняются байт-в-байт.
+
+Перед первой записью приложение валидирует проект и готовит канонические версии
+всех Node-файлов. Для каждого кандидата повторно проверяется исходная revision.
+При concurrent edit возникает `RevisionConflict`; при позднем сбое уже
+перезаписанные файлы откатываются к исходным байтам. Успешная операция обновляет
+snapshot и публикует warnings через `last_diagnostics()`.
+
+### 10.6. Ошибки Python API
 
 Публичная иерархия исключений:
 
@@ -865,7 +885,7 @@ rf graph path SOURCE TARGET
 rf graph export
 
 rf validate
-rf format --check
+rf format [--check]
 ```
 
 Примеры:
@@ -893,6 +913,7 @@ rf node list --kind hypothesis --status active --tag retrieval
 rf graph traverse hyp-01K2M7K6 --direction both --depth 2
 rf graph export --format json
 rf validate
+rf format --check
 ```
 
 Префиксы ID принимаются, только если однозначно разрешаются. Неоднозначный
@@ -983,12 +1004,27 @@ JSON input для `node create` может включать те же начал
 }
 ```
 
-### 11.4. Exit codes
+### 11.4. Форматирование
+
+`rf format` явно приводит YAML front matter всех Node-файлов к стабильному
+порядку полей и единому представлению restricted YAML. Команда не форматирует
+Markdown body и не считает `PROJECT.md` узлом. Весь результат готовится до
+первой записи; поздний сбой приводит к rollback уже изменённых файлов.
+
+`rf format --check` выполняет ту же проверку без записи. Канонический проект
+даёт exit code `0`. Если нужны изменения, команда возвращает exit code `1` и
+ошибку `formatting_required`; в `details.paths` перечислены относительные пути.
+Повторный `rf format` идемпотентен.
+
+Успешный JSON-ответ содержит `formatted`, `check`, `checked_files` и
+`changed_files`, а также обычный верхнеуровневый массив `warnings`.
+
+### 11.5. Exit codes
 
 | Code | Значение |
 |---:|---|
 | 0 | Успех |
-| 1 | Неожиданная внутренняя ошибка |
+| 1 | Проверка состояния не прошла (например, format drift) или внутренняя ошибка |
 | 2 | Неверные CLI arguments |
 | 3 | Ошибка валидации проекта или input |
 | 4 | Объект не найден или ссылка неоднозначна |
@@ -1044,6 +1080,8 @@ suggestion: Create the target or remove the relation
 ```
 
 `rf validate` не изменяет файлы. Ошибки дают ненулевой exit code, warnings — нет.
+`rf format --check` также не изменяет файлы; неканоническое представление даёт
+`formatting_required`, а validation errors сохраняют обычный exit code `3`.
 
 ## 13. Git и совместная работа
 

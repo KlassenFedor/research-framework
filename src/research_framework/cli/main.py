@@ -322,7 +322,7 @@ def _build_parser() -> Parser:
     return parser
 
 
-def _handle(args: argparse.Namespace) -> None:
+def _handle(args: argparse.Namespace) -> int | None:
     cwd = Path.cwd()
     if args.command == "init":
         project = Project.init(
@@ -362,14 +362,32 @@ def _handle(args: argparse.Namespace) -> None:
         return
 
     if args.command == "format":
-        diagnostics = validate_project(cwd)
-        errors = [
-            item for item in diagnostics if item.severity is DiagnosticSeverity.ERROR
-        ]
-        if errors:
-            raise ValidationFailed(tuple(diagnostics))
-        _success({"formatted": False, "check": args.check}) if args.json else print(
-            "Formatting is valid"
+        project = Project.open(cwd)
+        result = project.format(check=args.check)
+        changed = [str(path.relative_to(project.root)) for path in result.changed_paths]
+        if args.check and changed:
+            message = f"{len(changed)} file(s) require formatting"
+            if args.json:
+                _error("formatting_required", message, {"paths": changed})
+            else:
+                print(message, file=sys.stderr)
+                for path in changed:
+                    print(path, file=sys.stderr)
+            return 1
+        data = {
+            "formatted": result.applied and bool(changed),
+            "check": args.check,
+            "checked_files": result.checked_files,
+            "changed_files": changed,
+        }
+        message = (
+            f"Formatted {len(changed)} file(s)" if changed else "Formatting is valid"
+        )
+        _mutation_success(
+            project,
+            data,
+            json_mode=args.json,
+            message=message,
         )
         return
 
@@ -566,8 +584,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     json_mode = "--json" in arguments
     try:
         args = _build_parser().parse_args(arguments)
-        _handle(args)
-        return 0
+        exit_code = _handle(args)
+        return 0 if exit_code is None else exit_code
     except CliUsageError as error:
         if json_mode:
             _error("invalid_arguments", str(error))

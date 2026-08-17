@@ -1,3 +1,3 @@
-from .project import Project
+from .project import FormatResult, Project
 
-__all__ = ["Project"]
+__all__ = ["FormatResult", "Project"]

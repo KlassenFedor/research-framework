@@ -1,4 +1,4 @@
-from .application import Project
+from .application import FormatResult, Project
 from .domain.actors import Actor
 from .domain.diagnostics import Diagnostic
 from .domain.edges import RelationDraft
@@ -47,6 +47,7 @@ __all__ = [
     "EdgeNotFound",
     "EvidenceDraft",
     "ExperimentDraft",
+    "FormatResult",
     "HypothesisDraft",
     "NodeKind",
     "NodeNotFound",

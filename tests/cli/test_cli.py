@@ -872,10 +872,83 @@ def test_format_check_is_read_only(example_project: Path) -> None:
         path: path.read_bytes() for path in (example_project / "research").rglob("*.md")
     }
 
-    result = run_cli(example_project, "format", "--check")
+    result = run_cli(example_project, "format", "--check", "--json")
 
-    assert result.returncode == 0
+    payload = json_stdout(result)
+    assert result.returncode == 1
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "formatting_required"
+    assert len(payload["error"]["details"]["paths"]) == 11
     assert {path: path.read_bytes() for path in before} == before
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_format_applies_changes_and_second_check_is_clean(
+    example_project: Path,
+) -> None:
+    project_readme = example_project / "research" / "PROJECT.md"
+    readme_before = project_readme.read_bytes()
+    nodes = {
+        path: path.read_bytes()
+        for path in (example_project / "research").rglob("*.md")
+        if path.name != "PROJECT.md"
+    }
+
+    applied = run_cli(example_project, "format", "--json")
+
+    payload = json_stdout(applied)
+    assert applied.returncode == 0
+    assert payload["ok"] is True
+    assert payload["data"] == {
+        "formatted": True,
+        "check": False,
+        "checked_files": 11,
+        "changed_files": sorted(
+            str(path.relative_to(example_project)) for path in nodes
+        ),
+    }
+    assert payload["warnings"] == []
+    assert project_readme.read_bytes() == readme_before
+    assert {path: _body_bytes(path.read_bytes()) for path in nodes} == {
+        path: _body_bytes(raw) for path, raw in nodes.items()
+    }
+
+    checked = run_cli(example_project, "format", "--check", "--json")
+
+    checked_payload = json_stdout(checked)
+    assert checked.returncode == 0
+    assert checked_payload == {
+        "ok": True,
+        "data": {
+            "formatted": False,
+            "check": True,
+            "checked_files": 11,
+            "changed_files": [],
+        },
+        "warnings": [],
+    }
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_format_json_surfaces_project_warnings(example_project: Path) -> None:
+    hypothesis = next((example_project / "research" / "hypotheses").glob("*.md"))
+    archive_fixture_node(hypothesis)
+
+    result = run_cli(example_project, "format", "--json")
+
+    payload = json_stdout(result)
+    assert result.returncode == 0
+    assert payload["ok"] is True
+    assert payload["data"]["formatted"] is True
+    assert payload["warnings"]
+    assert all(item["severity"] == "warning" for item in payload["warnings"])
+
+
+def _body_bytes(raw: bytes) -> bytes:
+    closing = raw.index(b"\n---\n", 4)
+    return raw[closing + len(b"\n---\n") :]
 
 
 @pytest.mark.contract
