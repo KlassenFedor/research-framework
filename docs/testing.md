@@ -15,8 +15,8 @@
 | Markdown codec | Golden files, body round-trip, порядок полей, restricted YAML 1.2 |
 | Discovery | Поиск от вложенного пути, границы vault, symlinks, детерминизм |
 | Validation | Syntax, structural, referential, semantic и graph diagnostics |
-| Storage | Atomic write, revision conflict, локальность diff, защита путей |
-| Python API | Init/open, atomic create с initial relations, update/archive, add/remove edge, snapshots |
+| Storage | Candidate prevalidation, atomic write/rollback, revision conflict, локальность diff, защита путей |
+| Python API | Init/open, atomic create/update/archive, atomic add/remove edge, snapshots |
 | CLI | Human/JSON modes, initial relation flags, stdin, стабильные схемы и exit codes |
 | End-to-end | `init → create → link → reopen → traverse → validate → export` |
 
@@ -45,10 +45,10 @@
 
 ## Текущий статус
 
-На 2026-08-17 pytest собирает и успешно выполняет 276 сценариев:
+На 2026-08-17 pytest собирает и успешно выполняет 289 сценариев:
 
 ```text
-276 passed
+289 passed
 ```
 
 Дополнительно проходят Ruff, Ruff format check, `compileall`, сборка пакета и

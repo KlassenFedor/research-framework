@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import NODE_IDS
+from tests.conftest import NODE_IDS, RELATION_IDS
 
 
 def run_cli(
@@ -455,6 +455,36 @@ def test_cli_revision_conflict_uses_exit_code_five(example_project: Path) -> Non
 
 @pytest.mark.contract
 @pytest.mark.cli
+def test_node_update_semantic_failure_does_not_change_file(
+    example_project: Path,
+) -> None:
+    run = next((example_project / "research" / "runs").glob("*.md"))
+    before = run.read_bytes()
+    shown = run_cli(example_project, "node", "show", NODE_IDS["run"], "--json")
+    request = {
+        "patch": {"outcome": "succeeded"},
+        "expected_revision": json_stdout(shown)["data"]["revision"],
+        "actor": {"kind": "human", "id": "editor"},
+    }
+
+    result = run_cli(
+        example_project,
+        "node",
+        "update",
+        NODE_IDS["run"],
+        "--from-json",
+        "-",
+        "--json",
+        input_text=json.dumps(request),
+    )
+
+    assert result.returncode == 3
+    assert json_stdout(result)["error"]["code"] == "validation_failed"
+    assert run.read_bytes() == before
+
+
+@pytest.mark.contract
+@pytest.mark.cli
 def test_link_add_from_json_and_list_incoming_relation(example_project: Path) -> None:
     request = {
         "source": NODE_IDS["evidence"],
@@ -488,6 +518,56 @@ def test_link_add_from_json_and_list_incoming_relation(example_project: Path) ->
     assert created.returncode == 0
     assert created_payload["data"]["id"].startswith("rel-")
     assert created_payload["data"] in listed_payload["data"]
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_link_add_global_failure_does_not_change_file(example_project: Path) -> None:
+    run = next((example_project / "research" / "runs").glob("*.md"))
+    before = run.read_bytes()
+    request = {
+        "source": NODE_IDS["run"],
+        "kind": "instance_of",
+        "target": NODE_IDS["experiment"],
+        "actor": {"kind": "human", "id": "editor"},
+    }
+
+    result = run_cli(
+        example_project,
+        "link",
+        "add",
+        "--from-json",
+        "-",
+        "--json",
+        input_text=json.dumps(request),
+    )
+
+    assert result.returncode == 3
+    assert json_stdout(result)["error"]["code"] == "validation_failed"
+    assert run.read_bytes() == before
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_link_remove_required_relation_does_not_change_file(
+    example_project: Path,
+) -> None:
+    run = next((example_project / "research" / "runs").glob("*.md"))
+    before = run.read_bytes()
+
+    result = run_cli(
+        example_project,
+        "link",
+        "remove",
+        RELATION_IDS["instance_of"],
+        "--actor",
+        "editor",
+        "--json",
+    )
+
+    assert result.returncode == 3
+    assert json_stdout(result)["error"]["code"] == "validation_failed"
+    assert run.read_bytes() == before
 
 
 @pytest.mark.contract

@@ -14,7 +14,7 @@ from typing import Any
 
 from research_framework.domain.actors import Actor
 from research_framework.domain.diagnostics import Diagnostic
-from research_framework.domain.edges import RelationDraft, relation_is_allowed
+from research_framework.domain.edges import RelationDraft
 from research_framework.domain.enums import (
     DiagnosticSeverity,
     EdgeKind,
@@ -208,16 +208,18 @@ class Project:
         # Decode before touching the destination so serialization failures are
         # never able to corrupt a valid node.
         self._codec.decode(encoded, path=target)
+        self._atomic_write_bytes(target, encoded.encode("utf-8"))
+
+    def _atomic_write_bytes(self, target: Path, content: bytes) -> None:
+        self._safe_target(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         file_descriptor, temporary_name = tempfile.mkstemp(
             prefix=".rf-", suffix=".tmp", dir=target.parent
         )
         temporary = Path(temporary_name)
         try:
-            with os.fdopen(
-                file_descriptor, "w", encoding="utf-8", newline=""
-            ) as handle:
-                handle.write(encoded)
+            with os.fdopen(file_descriptor, "wb") as handle:
+                handle.write(content)
                 handle.flush()
                 os.fsync(handle.fileno())
             self._safe_target(target)
@@ -245,6 +247,60 @@ class Project:
                 ),
             )
         )
+
+    def _validate_candidate_document(
+        self,
+        target: Path,
+        metadata: Mapping[str, Any],
+    ) -> None:
+        from research_framework.validation import validate_candidate_node
+
+        diagnostics = validate_candidate_node(
+            self._discovered,
+            path=target,
+            metadata=metadata,
+        )
+        if any(item.severity is DiagnosticSeverity.ERROR for item in diagnostics):
+            raise ValidationFailed(diagnostics)
+
+    def _replace_document(
+        self,
+        target: Path,
+        metadata: Mapping[str, Any],
+        body: str,
+        *,
+        expected_revision: str,
+    ) -> None:
+        self._validate_candidate_document(target, metadata)
+        self._safe_target(target)
+        try:
+            original = target.read_bytes()
+        except OSError as error:
+            raise StorageError(f"cannot read node before update: {target}") from error
+        actual_revision = hashlib.sha256(original).hexdigest()
+        if actual_revision != expected_revision:
+            node_id = str(metadata.get("id", "unknown"))
+            raise RevisionConflict(node_id, expected_revision, actual_revision)
+
+        written = False
+        try:
+            self._write_document(
+                target,
+                metadata,
+                body,
+                expected_revision=expected_revision,
+            )
+            written = True
+            self._refresh()
+        except Exception:
+            if written:
+                try:
+                    self._atomic_write_bytes(target, original)
+                except Exception as rollback_error:
+                    raise StorageError(
+                        f"cannot roll back failed node update: {target}"
+                    ) from rollback_error
+            raise
 
     def create_node(
         self,
@@ -320,15 +376,7 @@ class Project:
         folder = self._discovered.vault / _FOLDERS[kind]
         target = folder / f"{node_id}--{_slug(draft.title)}.md"
         body = draft.body or f"\n# {draft.title}\n"
-        from research_framework.validation import validate_candidate_node
-
-        diagnostics = validate_candidate_node(
-            self._discovered,
-            path=target,
-            metadata=metadata,
-        )
-        if any(item.severity is DiagnosticSeverity.ERROR for item in diagnostics):
-            raise ValidationFailed(diagnostics)
+        self._validate_candidate_document(target, metadata)
         if target.exists():
             raise StorageError(f"refusing to overwrite existing node: {target}")
 
@@ -416,13 +464,12 @@ class Project:
         metadata.update({key: _plain(value) for key, value in patch.items()})
         metadata["updated_at"] = _now()
         metadata["updated_by"] = _actor_dict(actor)
-        self._write_document(
+        self._replace_document(
             node.path,
             metadata,
             body,
             expected_revision=expected_revision,
         )
-        self._refresh()
         return self._snapshot.get_node(node.id)
 
     def archive_node(
@@ -451,13 +498,6 @@ class Project:
         source_node = self._snapshot.get_node(source)
         target_node = self._snapshot.get_node(target)
         edge_kind = EdgeKind(kind)
-        if source_node.id == target_node.id and edge_kind is not EdgeKind.RELATED_TO:
-            raise self._invalid("self_relation", "relation cannot target its source")
-        if not relation_is_allowed(source_node.kind, edge_kind, target_node.kind):
-            raise self._invalid(
-                "relation_kind_mismatch",
-                "source and target kinds are invalid for relation",
-            )
         _, metadata, body = self._read_current(
             source_node.id, expected_revision=source_node.revision
         )
@@ -476,13 +516,12 @@ class Project:
         metadata["relations"] = relations
         metadata["updated_at"] = _now()
         metadata["updated_by"] = _actor_dict(actor)
-        self._write_document(
+        self._replace_document(
             source_node.path,
             metadata,
             body,
             expected_revision=source_node.revision,
         )
-        self._refresh()
         return self._snapshot.get_edge(edge_id)
 
     def remove_edge(self, edge_id: str, *, actor: Actor) -> None:
@@ -498,10 +537,9 @@ class Project:
         ]
         metadata["updated_at"] = _now()
         metadata["updated_by"] = _actor_dict(actor)
-        self._write_document(
+        self._replace_document(
             source_node.path,
             metadata,
             body,
             expected_revision=source_node.revision,
         )
-        self._refresh()

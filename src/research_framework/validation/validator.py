@@ -887,11 +887,15 @@ def _validate_global(
 def _load_records(
     project: DiscoveredProject,
     diagnostics: list[Diagnostic],
+    *,
+    exclude_path: Path | None = None,
 ) -> list[_Record]:
     codec = MarkdownCodec()
     records: list[_Record] = []
     for node_path in discover_node_files(project):
         relative_path = node_path.relative_to(project.root)
+        if relative_path == exclude_path:
+            continue
         try:
             text = node_path.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as error:
@@ -950,12 +954,17 @@ def validate_candidate_node(
     path: Path,
     metadata: Mapping[str, Any],
 ) -> tuple[Diagnostic, ...]:
-    """Validate an in-memory node as if it already existed in the project."""
+    """Validate an in-memory node as a project addition or path replacement."""
 
+    relative_path = path.relative_to(project.root)
     diagnostics: list[Diagnostic] = []
-    records = _load_records(project, diagnostics)
+    records = _load_records(
+        project,
+        diagnostics,
+        exclude_path=relative_path,
+    )
     record = _Record(
-        path=path.relative_to(project.root),
+        path=relative_path,
         metadata=dict(metadata),
     )
     records.append(record)
