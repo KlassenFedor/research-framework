@@ -109,6 +109,7 @@ class Project:
         self._discovered = discovered
         self._snapshot = snapshot
         self._codec = MarkdownCodec()
+        self._last_diagnostics: tuple[Diagnostic, ...] = ()
 
     @classmethod
     def open(cls, path: Path) -> Project:
@@ -158,6 +159,11 @@ class Project:
 
     def snapshot(self) -> GraphSnapshot:
         return self._snapshot
+
+    def last_diagnostics(self) -> tuple[Diagnostic, ...]:
+        """Diagnostics from the latest mutation when it completed successfully."""
+
+        return self._last_diagnostics
 
     @property
     def root(self) -> Path:
@@ -252,7 +258,7 @@ class Project:
         self,
         target: Path,
         metadata: Mapping[str, Any],
-    ) -> None:
+    ) -> tuple[Diagnostic, ...]:
         from research_framework.validation import validate_candidate_node
 
         diagnostics = validate_candidate_node(
@@ -262,6 +268,7 @@ class Project:
         )
         if any(item.severity is DiagnosticSeverity.ERROR for item in diagnostics):
             raise ValidationFailed(diagnostics)
+        return diagnostics
 
     def _replace_document(
         self,
@@ -270,8 +277,8 @@ class Project:
         body: str,
         *,
         expected_revision: str,
-    ) -> None:
-        self._validate_candidate_document(target, metadata)
+    ) -> tuple[Diagnostic, ...]:
+        diagnostics = self._validate_candidate_document(target, metadata)
         self._safe_target(target)
         try:
             original = target.read_bytes()
@@ -301,6 +308,7 @@ class Project:
                         f"cannot roll back failed node update: {target}"
                     ) from rollback_error
             raise
+        return diagnostics
 
     def create_node(
         self,
@@ -309,6 +317,7 @@ class Project:
         actor: Actor,
         initial_relations: Sequence[RelationDraft] = (),
     ) -> Node:
+        self._last_diagnostics = ()
         kind = draft.kind
         node_id = f"{_PREFIXES[kind]}-{_ulid()}"
         timestamp = _now()
@@ -376,7 +385,7 @@ class Project:
         folder = self._discovered.vault / _FOLDERS[kind]
         target = folder / f"{node_id}--{_slug(draft.title)}.md"
         body = draft.body or f"\n# {draft.title}\n"
-        self._validate_candidate_document(target, metadata)
+        diagnostics = self._validate_candidate_document(target, metadata)
         if target.exists():
             raise StorageError(f"refusing to overwrite existing node: {target}")
 
@@ -394,6 +403,7 @@ class Project:
                         f"cannot roll back failed node creation: {target}"
                     ) from rollback_error
             raise
+        self._last_diagnostics = diagnostics
         return self._snapshot.get_node(node_id)
 
     def _read_current(
@@ -422,6 +432,7 @@ class Project:
         expected_revision: str,
         actor: Actor,
     ) -> Node:
+        self._last_diagnostics = ()
         node, metadata, body = self._read_current(
             node_id, expected_revision=expected_revision
         )
@@ -464,12 +475,13 @@ class Project:
         metadata.update({key: _plain(value) for key, value in patch.items()})
         metadata["updated_at"] = _now()
         metadata["updated_by"] = _actor_dict(actor)
-        self._replace_document(
+        diagnostics = self._replace_document(
             node.path,
             metadata,
             body,
             expected_revision=expected_revision,
         )
+        self._last_diagnostics = diagnostics
         return self._snapshot.get_node(node.id)
 
     def archive_node(
@@ -495,6 +507,7 @@ class Project:
         actor: Actor,
         rationale: str | None = None,
     ) -> Edge:
+        self._last_diagnostics = ()
         source_node = self._snapshot.get_node(source)
         target_node = self._snapshot.get_node(target)
         edge_kind = EdgeKind(kind)
@@ -516,15 +529,17 @@ class Project:
         metadata["relations"] = relations
         metadata["updated_at"] = _now()
         metadata["updated_by"] = _actor_dict(actor)
-        self._replace_document(
+        diagnostics = self._replace_document(
             source_node.path,
             metadata,
             body,
             expected_revision=source_node.revision,
         )
+        self._last_diagnostics = diagnostics
         return self._snapshot.get_edge(edge_id)
 
     def remove_edge(self, edge_id: str, *, actor: Actor) -> None:
+        self._last_diagnostics = ()
         edge = self._snapshot.get_edge(edge_id)
         source_node = self._snapshot.get_node(edge.source)
         _, metadata, body = self._read_current(
@@ -537,9 +552,10 @@ class Project:
         ]
         metadata["updated_at"] = _now()
         metadata["updated_by"] = _actor_dict(actor)
-        self._replace_document(
+        diagnostics = self._replace_document(
             source_node.path,
             metadata,
             body,
             expected_revision=source_node.revision,
         )
+        self._last_diagnostics = diagnostics

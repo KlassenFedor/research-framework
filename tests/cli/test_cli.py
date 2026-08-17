@@ -39,6 +39,14 @@ def json_stdout(result: subprocess.CompletedProcess[str]) -> dict:
     return json.loads(result.stdout)
 
 
+def archive_fixture_node(path: Path) -> None:
+    source = path.read_text(encoding="utf-8")
+    assert "status: active" in source
+    path.write_text(
+        source.replace("status: active", "status: archived", 1), encoding="utf-8"
+    )
+
+
 @pytest.mark.contract
 @pytest.mark.cli
 def test_root_help_lists_stable_mvp_command_groups(tmp_path: Path) -> None:
@@ -418,6 +426,40 @@ def test_node_update_and_archive_cover_full_lifecycle(example_project: Path) -> 
 
 @pytest.mark.contract
 @pytest.mark.cli
+def test_node_archive_json_returns_incoming_relation_warning(
+    example_project: Path,
+) -> None:
+    shown = run_cli(
+        example_project,
+        "node",
+        "show",
+        NODE_IDS["hypothesis"],
+        "--json",
+    )
+
+    result = run_cli(
+        example_project,
+        "node",
+        "archive",
+        NODE_IDS["hypothesis"],
+        "--expected-revision",
+        json_stdout(shown)["data"]["revision"],
+        "--actor",
+        "archivist",
+        "--json",
+    )
+
+    payload = json_stdout(result)
+    assert result.returncode == 0
+    assert payload["data"]["status"] == "archived"
+    assert any(
+        warning["code"] == "archived_target" and warning["details"] == {}
+        for warning in payload["warnings"]
+    )
+
+
+@pytest.mark.contract
+@pytest.mark.cli
 def test_cli_revision_conflict_uses_exit_code_five(example_project: Path) -> None:
     shown = run_cli(
         example_project,
@@ -518,6 +560,97 @@ def test_link_add_from_json_and_list_incoming_relation(example_project: Path) ->
     assert created.returncode == 0
     assert created_payload["data"]["id"].startswith("rel-")
     assert created_payload["data"] in listed_payload["data"]
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_link_add_json_returns_archived_target_warning(example_project: Path) -> None:
+    claim = next((example_project / "research" / "claims").glob("*.md"))
+    archive_fixture_node(claim)
+    request = {
+        "source": NODE_IDS["evidence"],
+        "kind": "supports",
+        "target": NODE_IDS["claim"],
+        "actor": {"kind": "human", "id": "reviewer"},
+    }
+
+    result = run_cli(
+        example_project,
+        "link",
+        "add",
+        "--from-json",
+        "-",
+        "--json",
+        input_text=json.dumps(request),
+    )
+
+    payload = json_stdout(result)
+    assert result.returncode == 0
+    assert payload["ok"] is True
+    assert any(
+        warning["code"] == "archived_target"
+        and warning["edge_id"] == payload["data"]["id"]
+        for warning in payload["warnings"]
+    )
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_link_add_human_mode_writes_warning_to_stderr(example_project: Path) -> None:
+    claim = next((example_project / "research" / "claims").glob("*.md"))
+    archive_fixture_node(claim)
+
+    result = run_cli(
+        example_project,
+        "link",
+        "add",
+        NODE_IDS["evidence"],
+        "supports",
+        NODE_IDS["claim"],
+        "--actor",
+        "reviewer",
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.startswith("Created rel-")
+    assert "warning: archived_target:" in result.stderr
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_node_create_json_returns_initial_relation_warning(
+    example_project: Path,
+) -> None:
+    experiment = next((example_project / "research" / "experiments").glob("*.md"))
+    archive_fixture_node(experiment)
+    request = {
+        "title": "Archived protocol run",
+        "started_at": "2026-08-17T12:00:00+07:00",
+        "outcome": "running",
+        "initial_relations": [
+            {"kind": "instance_of", "target": NODE_IDS["experiment"]}
+        ],
+        "actor": {"kind": "human", "id": "runner"},
+    }
+
+    result = run_cli(
+        example_project,
+        "node",
+        "create",
+        "run",
+        "--from-json",
+        "-",
+        "--json",
+        input_text=json.dumps(request),
+    )
+
+    payload = json_stdout(result)
+    assert result.returncode == 0
+    assert any(
+        warning["code"] == "archived_target"
+        and warning["node_id"] == payload["data"]["id"]
+        for warning in payload["warnings"]
+    )
 
 
 @pytest.mark.contract

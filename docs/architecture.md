@@ -770,6 +770,18 @@ run = project.create_node(
 связей и проверяет будущий граф до записи. Операция либо создаёт один полностью
 валидный Markdown-файл, либо не изменяет проект.
 
+Return types мутаций остаются компактными (`Node`, `Edge` или `None`), а warnings
+последней успешной операции доступны отдельно:
+
+```python
+edge = project.add_edge(...)
+warnings = project.last_diagnostics()
+```
+
+Перед началом следующей мутации diagnostics очищаются. Ошибочная мутация
+возвращает diagnostics через `ValidationFailed` и не оставляет candidate warnings
+в `last_diagnostics()`.
+
 ### 10.3. Создание связи
 
 ```python
@@ -938,6 +950,10 @@ JSON input для `node create` может включать те же начал
 - diagnostics и результат имеют стабильную схему;
 - логи отправляются в stderr;
 - timestamps и enums не локализуются.
+
+Успешные mutation-команды передают warnings из того же candidate validation в
+верхнеуровневом массиве `warnings`. В human-oriented режиме те же warnings
+печатаются в stderr и не меняют exit code `0`.
 
 Успешный ответ:
 

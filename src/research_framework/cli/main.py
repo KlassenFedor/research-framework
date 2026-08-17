@@ -62,6 +62,26 @@ def _success(data: Any, warnings: Sequence[Any] = ()) -> None:
     )
 
 
+def _mutation_success(
+    project: Project,
+    data: Any,
+    *,
+    json_mode: bool,
+    message: str,
+) -> None:
+    warnings = tuple(
+        diagnostic
+        for diagnostic in project.last_diagnostics()
+        if diagnostic.severity is DiagnosticSeverity.WARNING
+    )
+    if json_mode:
+        _success(data, warnings)
+        return
+    print(message)
+    for warning in warnings:
+        print(f"warning: {warning.code}: {warning.message}", file=sys.stderr)
+
+
 def _error(code: str, message: str, details: Mapping[str, Any] | None = None) -> None:
     _json(
         {
@@ -419,7 +439,12 @@ def _handle(args: argparse.Namespace) -> None:
                 initial_relations=relations,
             )
             data = _node_to_dict(created)
-            _success(data) if args.json else print(f"Created {created.id}")
+            _mutation_success(
+                project,
+                data,
+                json_mode=args.json,
+                message=f"Created {created.id}",
+            )
         elif args.node_command == "update":
             request = _read_request(args.from_json)
             updated = project.update_node(
@@ -429,7 +454,12 @@ def _handle(args: argparse.Namespace) -> None:
                 actor=_actor(request.get("actor", {})),
             )
             data = _node_to_dict(updated)
-            _success(data) if args.json else print(f"Updated {updated.id}")
+            _mutation_success(
+                project,
+                data,
+                json_mode=args.json,
+                message=f"Updated {updated.id}",
+            )
         elif args.node_command == "archive":
             archived = project.archive_node(
                 args.reference,
@@ -437,7 +467,12 @@ def _handle(args: argparse.Namespace) -> None:
                 actor=_human_actor(args.actor),
             )
             data = _node_to_dict(archived)
-            _success(data) if args.json else print(f"Archived {archived.id}")
+            _mutation_success(
+                project,
+                data,
+                json_mode=args.json,
+                message=f"Archived {archived.id}",
+            )
         return
 
     if args.command == "link":
@@ -465,7 +500,12 @@ def _handle(args: argparse.Namespace) -> None:
                 actor=actor,
             )
             data = edge.to_dict()
-            _success(data) if args.json else print(f"Created {edge.id}")
+            _mutation_success(
+                project,
+                data,
+                json_mode=args.json,
+                message=f"Created {edge.id}",
+            )
         elif args.link_command == "list":
             edges = []
             if args.direction in {"outgoing", "both"}:
@@ -480,7 +520,12 @@ def _handle(args: argparse.Namespace) -> None:
         elif args.link_command == "remove":
             project.remove_edge(args.edge_id, actor=_human_actor(args.actor))
             data = {"id": args.edge_id, "removed": True}
-            _success(data) if args.json else print(f"Removed {args.edge_id}")
+            _mutation_success(
+                project,
+                data,
+                json_mode=args.json,
+                message=f"Removed {args.edge_id}",
+            )
         return
 
     if args.command == "graph":
