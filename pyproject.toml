@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "research-framework"
+version = "0.1.0"
+description = "A Git-native, text-first research graph"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = [
+  "pyyaml>=6.0.2",
+]
+
+[project.scripts]
+rf = "research_framework.cli.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/research_framework"]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "pytest-cov>=6.0",
+  "ruff>=0.12",
+]
+
+[tool.pytest.ini_options]
+minversion = "8.3"
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = [
+  "-ra",
+  "--strict-config",
+  "--strict-markers",
+]
+markers = [
+  "contract: executable public-contract tests",
+  "integration: tests crossing storage/application boundaries",
+  "cli: command-line integration tests",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["research_framework"]
+relative_files = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+# CLI contract tests intentionally execute a separate Python process, so their
+# lines are not attributed to the parent coverage process.
+fail_under = 70

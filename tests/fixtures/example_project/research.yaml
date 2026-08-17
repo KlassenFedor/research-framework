@@ -1,0 +1,11 @@
+format_version: 1
+project_id: prj-01J00000000000000000000000
+title: Example retrieval research
+vault: research
+default_language: en
+
+policies:
+  require_falsification_criteria: true
+  require_evidence_provenance: true
+  forbid_dependency_cycles: true
+

@@ -1,0 +1,928 @@
+from __future__ import annotations
+
+import re
+from collections import defaultdict
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from research_framework.domain.diagnostics import Diagnostic
+from research_framework.domain.edges import relation_is_allowed
+from research_framework.domain.enums import (
+    DiagnosticSeverity,
+    EdgeKind,
+    NodeKind,
+    NodeStatus,
+)
+from research_framework.storage.discovery import discover_node_files, discover_project
+from research_framework.storage.markdown_codec import MarkdownCodec, MarkdownCodecError
+
+_ULID = r"[0-9A-HJKMNP-TV-Z]{26}"
+_NODE_PREFIXES = {
+    "question": "que",
+    "hypothesis": "hyp",
+    "claim": "clm",
+    "experiment": "exp",
+    "run": "run",
+    "evidence": "evd",
+    "assessment": "asm",
+    "source": "src",
+    "artifact": "art",
+    "decision": "dec",
+}
+_NODE_ID = re.compile(rf"^(?:{'|'.join(_NODE_PREFIXES.values())})-{_ULID}$")
+_EDGE_ID = re.compile(rf"^rel-{_ULID}$")
+
+_COMMON_FIELDS = {
+    "format_version",
+    "id",
+    "kind",
+    "title",
+    "status",
+    "summary",
+    "tags",
+    "aliases",
+    "created_at",
+    "created_by",
+    "updated_at",
+    "updated_by",
+    "relations",
+    "extensions",
+}
+_SPECIAL_FIELDS: dict[str, set[str]] = {
+    "question": {"question", "scope"},
+    "hypothesis": {"statement", "falsification_criteria", "assumptions"},
+    "claim": {"statement"},
+    "experiment": {"objective", "method", "success_criteria", "protocol_version"},
+    "run": {"started_at", "finished_at", "outcome", "environment"},
+    "evidence": {"observation", "evidence_kind", "collected_at"},
+    "assessment": {"verdict", "confidence", "limitations", "review_state"},
+    "source": {"source_kind", "locator", "citation", "accessed_at"},
+    "artifact": {"locator", "media_type", "sha256", "size"},
+    "decision": {"outcome", "rationale"},
+}
+_REQUIRED_COMMON = {
+    "format_version",
+    "id",
+    "kind",
+    "title",
+    "status",
+    "created_at",
+    "created_by",
+    "updated_at",
+    "updated_by",
+}
+_REQUIRED_SPECIAL: dict[str, set[str]] = {
+    "question": {"question"},
+    "hypothesis": {"statement", "falsification_criteria"},
+    "claim": {"statement"},
+    "experiment": {"objective", "method", "success_criteria", "protocol_version"},
+    "run": {"started_at", "outcome"},
+    "evidence": {"observation", "evidence_kind"},
+    "assessment": {"verdict", "confidence", "review_state"},
+    "source": {"source_kind", "locator"},
+    "artifact": {"locator"},
+    "decision": {"outcome", "rationale"},
+}
+
+
+@dataclass(slots=True)
+class _Record:
+    path: Path
+    metadata: dict[str, Any]
+
+    @property
+    def node_id(self) -> str | None:
+        value = self.metadata.get("id")
+        return value if isinstance(value, str) else None
+
+    @property
+    def kind(self) -> NodeKind | None:
+        try:
+            return NodeKind(self.metadata.get("kind"))
+        except (TypeError, ValueError):
+            return None
+
+
+def _diagnostic(
+    code: str,
+    message: str,
+    *,
+    path: Path | None = None,
+    node_id: str | None = None,
+    edge_id: str | None = None,
+    field: str | None = None,
+    suggestion: str | None = None,
+    severity: DiagnosticSeverity = DiagnosticSeverity.ERROR,
+    details: dict[str, Any] | None = None,
+) -> Diagnostic:
+    return Diagnostic(
+        severity=severity,
+        code=code,
+        message=message,
+        path=path,
+        node_id=node_id,
+        edge_id=edge_id,
+        field=field,
+        suggestion=suggestion,
+        details=details or {},
+    )
+
+
+def _is_missing(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _parse_datetime(
+    value: Any,
+    *,
+    field: str,
+    record: _Record,
+    diagnostics: list[Diagnostic],
+) -> datetime | None:
+    if not isinstance(value, str):
+        diagnostics.append(
+            _diagnostic(
+                "invalid_field_type",
+                f"{field} must be an ISO 8601 string",
+                path=record.path,
+                node_id=record.node_id,
+                field=field,
+            )
+        )
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        diagnostics.append(
+            _diagnostic(
+                "invalid_timestamp",
+                f"{field} is not a valid ISO 8601 timestamp",
+                path=record.path,
+                node_id=record.node_id,
+                field=field,
+            )
+        )
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        diagnostics.append(
+            _diagnostic(
+                "timezone_required",
+                f"{field} must include a timezone",
+                path=record.path,
+                node_id=record.node_id,
+                field=field,
+            )
+        )
+        return None
+    return parsed
+
+
+def _validate_actor(
+    actor: Any,
+    *,
+    field: str,
+    record: _Record,
+    diagnostics: list[Diagnostic],
+) -> None:
+    if not isinstance(actor, dict):
+        diagnostics.append(
+            _diagnostic(
+                "invalid_field_type",
+                f"{field} must be a mapping",
+                path=record.path,
+                node_id=record.node_id,
+                field=field,
+            )
+        )
+        return
+    if actor.get("kind") not in {"human", "agent"}:
+        diagnostics.append(
+            _diagnostic(
+                "invalid_actor_kind",
+                "actor kind must be human or agent",
+                path=record.path,
+                node_id=record.node_id,
+                field=f"{field}.kind",
+            )
+        )
+    actor_id = actor.get("id")
+    if not isinstance(actor_id, str) or not actor_id.strip():
+        diagnostics.append(
+            _diagnostic(
+                "invalid_actor_id",
+                "actor id must be a non-blank string",
+                path=record.path,
+                node_id=record.node_id,
+                field=f"{field}.id",
+            )
+        )
+
+
+def _validate_string_list(
+    value: Any,
+    *,
+    field: str,
+    record: _Record,
+    diagnostics: list[Diagnostic],
+) -> list[str] | None:
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item.strip() for item in value
+    ):
+        diagnostics.append(
+            _diagnostic(
+                "invalid_field_type",
+                f"{field} must be a list of non-blank strings",
+                path=record.path,
+                node_id=record.node_id,
+                field=field,
+            )
+        )
+        return None
+    return value
+
+
+def _validate_structural(record: _Record, diagnostics: list[Diagnostic]) -> None:
+    metadata = record.metadata
+    kind_value = metadata.get("kind")
+    kind = record.kind
+
+    for field in sorted(
+        _REQUIRED_COMMON | _REQUIRED_SPECIAL.get(str(kind_value), set())
+    ):
+        if field not in metadata or _is_missing(metadata.get(field)):
+            diagnostics.append(
+                _diagnostic(
+                    "missing_required_field",
+                    f"required field is missing: {field}",
+                    path=record.path,
+                    node_id=record.node_id,
+                    field=field,
+                )
+            )
+
+    allowed = _COMMON_FIELDS | _SPECIAL_FIELDS.get(str(kind_value), set())
+    for field in sorted(set(metadata) - allowed):
+        diagnostics.append(
+            _diagnostic(
+                "unknown_field",
+                f"unknown top-level field: {field}",
+                path=record.path,
+                node_id=record.node_id,
+                field=field,
+            )
+        )
+
+    if metadata.get("format_version") != 1:
+        diagnostics.append(
+            _diagnostic(
+                "unsupported_format_version",
+                "node format_version must be 1",
+                path=record.path,
+                node_id=record.node_id,
+                field="format_version",
+            )
+        )
+
+    node_id = metadata.get("id")
+    if not isinstance(node_id, str) or not _NODE_ID.fullmatch(node_id):
+        diagnostics.append(
+            _diagnostic(
+                "invalid_node_id",
+                "node id must contain a kind prefix and ULID",
+                path=record.path,
+                node_id=node_id if isinstance(node_id, str) else None,
+                field="id",
+            )
+        )
+    elif kind is not None and not node_id.startswith(f"{_NODE_PREFIXES[kind.value]}-"):
+        diagnostics.append(
+            _diagnostic(
+                "invalid_node_id",
+                "node id prefix does not match kind",
+                path=record.path,
+                node_id=node_id,
+                field="id",
+            )
+        )
+
+    if kind is None:
+        diagnostics.append(
+            _diagnostic(
+                "invalid_node_kind",
+                "kind is not an MVP node kind",
+                path=record.path,
+                node_id=record.node_id,
+                field="kind",
+            )
+        )
+    try:
+        NodeStatus(metadata.get("status"))
+    except (TypeError, ValueError):
+        diagnostics.append(
+            _diagnostic(
+                "invalid_status",
+                "status is not a valid lifecycle state",
+                path=record.path,
+                node_id=record.node_id,
+                field="status",
+            )
+        )
+
+    for field in ("title", "summary"):
+        if (
+            field in metadata
+            and metadata[field] is not None
+            and not isinstance(metadata[field], str)
+        ):
+            diagnostics.append(
+                _diagnostic(
+                    "invalid_field_type",
+                    f"{field} must be a string",
+                    path=record.path,
+                    node_id=record.node_id,
+                    field=field,
+                )
+            )
+
+    tags = metadata.get("tags")
+    if tags is not None:
+        _validate_string_list(
+            tags, field="tags", record=record, diagnostics=diagnostics
+        )
+    aliases = metadata.get("aliases")
+    if aliases is not None:
+        valid_aliases = _validate_string_list(
+            aliases, field="aliases", record=record, diagnostics=diagnostics
+        )
+        if valid_aliases is not None and len(set(valid_aliases)) != len(valid_aliases):
+            diagnostics.append(
+                _diagnostic(
+                    "duplicate_alias",
+                    "aliases must be unique",
+                    path=record.path,
+                    node_id=record.node_id,
+                    field="aliases",
+                )
+            )
+
+    created = _parse_datetime(
+        metadata.get("created_at"),
+        field="created_at",
+        record=record,
+        diagnostics=diagnostics,
+    )
+    updated = _parse_datetime(
+        metadata.get("updated_at"),
+        field="updated_at",
+        record=record,
+        diagnostics=diagnostics,
+    )
+    if created is not None and updated is not None and updated < created:
+        diagnostics.append(
+            _diagnostic(
+                "updated_before_created",
+                "updated_at cannot precede created_at",
+                path=record.path,
+                node_id=record.node_id,
+                field="updated_at",
+            )
+        )
+    _validate_actor(
+        metadata.get("created_by"),
+        field="created_by",
+        record=record,
+        diagnostics=diagnostics,
+    )
+    _validate_actor(
+        metadata.get("updated_by"),
+        field="updated_by",
+        record=record,
+        diagnostics=diagnostics,
+    )
+
+    extensions = metadata.get("extensions")
+    if extensions is not None and not isinstance(extensions, dict):
+        diagnostics.append(
+            _diagnostic(
+                "invalid_field_type",
+                "extensions must be a mapping",
+                path=record.path,
+                node_id=record.node_id,
+                field="extensions",
+            )
+        )
+
+    _validate_kind_fields(record, diagnostics)
+    _validate_relations(record, diagnostics)
+
+
+def _validate_kind_fields(record: _Record, diagnostics: list[Diagnostic]) -> None:
+    metadata = record.metadata
+    kind = record.kind
+    if kind is NodeKind.RUN:
+        outcome = metadata.get("outcome")
+        if outcome not in {"running", "completed", "failed", "cancelled"}:
+            diagnostics.append(
+                _diagnostic(
+                    "invalid_run_outcome",
+                    "invalid run outcome",
+                    path=record.path,
+                    node_id=record.node_id,
+                    field="outcome",
+                )
+            )
+        started = _parse_datetime(
+            metadata.get("started_at"),
+            field="started_at",
+            record=record,
+            diagnostics=diagnostics,
+        )
+        finished_value = metadata.get("finished_at")
+        finished = None
+        if finished_value is not None:
+            finished = _parse_datetime(
+                finished_value,
+                field="finished_at",
+                record=record,
+                diagnostics=diagnostics,
+            )
+        if outcome in {"completed", "failed", "cancelled"} and finished_value is None:
+            diagnostics.append(
+                _diagnostic(
+                    "finished_at_required",
+                    "finished run requires finished_at",
+                    path=record.path,
+                    node_id=record.node_id,
+                    field="finished_at",
+                )
+            )
+        if started is not None and finished is not None and finished < started:
+            diagnostics.append(
+                _diagnostic(
+                    "run_time_order",
+                    "finished_at cannot precede started_at",
+                    path=record.path,
+                    node_id=record.node_id,
+                    field="finished_at",
+                )
+            )
+    elif kind is NodeKind.EVIDENCE:
+        if metadata.get("evidence_kind") not in {
+            "quantitative",
+            "qualitative",
+            "citation",
+            "derived",
+            "other",
+        }:
+            diagnostics.append(
+                _diagnostic(
+                    "invalid_evidence_kind",
+                    "invalid evidence_kind",
+                    path=record.path,
+                    node_id=record.node_id,
+                    field="evidence_kind",
+                )
+            )
+    elif kind is NodeKind.ASSESSMENT:
+        checks = (
+            (
+                "verdict",
+                {"supported", "challenged", "refuted", "inconclusive"},
+                "invalid_assessment_verdict",
+            ),
+            ("confidence", {"low", "medium", "high"}, "invalid_confidence"),
+            (
+                "review_state",
+                {"proposed", "approved", "rejected"},
+                "invalid_review_state",
+            ),
+        )
+        for field, allowed, code in checks:
+            if metadata.get(field) not in allowed:
+                diagnostics.append(
+                    _diagnostic(
+                        code,
+                        f"invalid assessment {field}",
+                        path=record.path,
+                        node_id=record.node_id,
+                        field=field,
+                    )
+                )
+    elif kind is NodeKind.SOURCE:
+        if metadata.get("source_kind") not in {
+            "paper",
+            "book",
+            "dataset",
+            "web",
+            "interview",
+            "other",
+        }:
+            diagnostics.append(
+                _diagnostic(
+                    "invalid_source_kind",
+                    "invalid source_kind",
+                    path=record.path,
+                    node_id=record.node_id,
+                    field="source_kind",
+                )
+            )
+    elif kind is NodeKind.ARTIFACT:
+        sha256 = metadata.get("sha256")
+        if sha256 is not None and (
+            not isinstance(sha256, str)
+            or re.fullmatch(r"[0-9a-fA-F]{64}", sha256) is None
+        ):
+            diagnostics.append(
+                _diagnostic(
+                    "invalid_sha256",
+                    "sha256 must contain 64 hexadecimal characters",
+                    path=record.path,
+                    node_id=record.node_id,
+                    field="sha256",
+                )
+            )
+        size = metadata.get("size")
+        if size is not None and (
+            not isinstance(size, int) or isinstance(size, bool) or size < 0
+        ):
+            diagnostics.append(
+                _diagnostic(
+                    "invalid_artifact_size",
+                    "artifact size must be a non-negative integer",
+                    path=record.path,
+                    node_id=record.node_id,
+                    field="size",
+                )
+            )
+
+
+def _validate_relations(record: _Record, diagnostics: list[Diagnostic]) -> None:
+    relations = record.metadata.get("relations", [])
+    if not isinstance(relations, list):
+        diagnostics.append(
+            _diagnostic(
+                "invalid_field_type",
+                "relations must be a list",
+                path=record.path,
+                node_id=record.node_id,
+                field="relations",
+            )
+        )
+        return
+    for index, relation in enumerate(relations):
+        prefix = f"relations[{index}]"
+        if not isinstance(relation, dict):
+            diagnostics.append(
+                _diagnostic(
+                    "invalid_field_type",
+                    "relation must be a mapping",
+                    path=record.path,
+                    node_id=record.node_id,
+                    field=prefix,
+                )
+            )
+            continue
+        edge_id = relation.get("id")
+        if not isinstance(edge_id, str) or _EDGE_ID.fullmatch(edge_id) is None:
+            diagnostics.append(
+                _diagnostic(
+                    "invalid_edge_id",
+                    "edge id must be rel- followed by ULID",
+                    path=record.path,
+                    node_id=record.node_id,
+                    edge_id=edge_id if isinstance(edge_id, str) else None,
+                    field=f"{prefix}.id",
+                )
+            )
+        try:
+            EdgeKind(relation.get("kind"))
+        except (TypeError, ValueError):
+            diagnostics.append(
+                _diagnostic(
+                    "invalid_edge_kind",
+                    "unknown relation kind",
+                    path=record.path,
+                    node_id=record.node_id,
+                    edge_id=edge_id if isinstance(edge_id, str) else None,
+                    field=f"{prefix}.kind",
+                )
+            )
+        target = relation.get("target")
+        if not isinstance(target, str) or not target:
+            diagnostics.append(
+                _diagnostic(
+                    "invalid_field_type",
+                    "relation target must be a node id",
+                    path=record.path,
+                    node_id=record.node_id,
+                    edge_id=edge_id if isinstance(edge_id, str) else None,
+                    field=f"{prefix}.target",
+                )
+            )
+        _parse_datetime(
+            relation.get("created_at"),
+            field=f"{prefix}.created_at",
+            record=record,
+            diagnostics=diagnostics,
+        )
+        _validate_actor(
+            relation.get("created_by"),
+            field=f"{prefix}.created_by",
+            record=record,
+            diagnostics=diagnostics,
+        )
+
+
+def _cycles(adjacency: Mapping[str, set[str]]) -> list[list[str]]:
+    state: dict[str, int] = {}
+    stack: list[str] = []
+    found: list[list[str]] = []
+
+    def visit(node: str) -> None:
+        state[node] = 1
+        stack.append(node)
+        for target in sorted(adjacency.get(node, set())):
+            if state.get(target, 0) == 0:
+                visit(target)
+            elif state.get(target) == 1:
+                start = stack.index(target)
+                cycle = stack[start:].copy()
+                if set(cycle) not in [set(existing) for existing in found]:
+                    found.append(cycle)
+        stack.pop()
+        state[node] = 2
+
+    for node in sorted(adjacency):
+        if state.get(node, 0) == 0:
+            visit(node)
+    return found
+
+
+def _validate_global(
+    records: list[_Record],
+    diagnostics: list[Diagnostic],
+    *,
+    root: Path,
+    require_evidence_provenance: bool,
+    forbid_dependency_cycles: bool,
+) -> None:
+    id_records: dict[str, list[_Record]] = defaultdict(list)
+    alias_records: dict[str, list[_Record]] = defaultdict(list)
+    edge_records: dict[str, list[tuple[_Record, int, dict[str, Any]]]] = defaultdict(
+        list
+    )
+    for record in records:
+        if record.node_id is not None:
+            id_records[record.node_id].append(record)
+        aliases = record.metadata.get("aliases", [])
+        if isinstance(aliases, list):
+            for alias in aliases:
+                if isinstance(alias, str):
+                    alias_records[alias].append(record)
+        relations = record.metadata.get("relations", [])
+        if isinstance(relations, list):
+            for index, relation in enumerate(relations):
+                if isinstance(relation, dict) and isinstance(relation.get("id"), str):
+                    edge_records[relation["id"]].append((record, index, relation))
+
+    for node_id, duplicates in id_records.items():
+        if len(duplicates) > 1:
+            paths = sorted(str(record.path) for record in duplicates)
+            diagnostics.append(
+                _diagnostic(
+                    "duplicate_node_id",
+                    f"duplicate node id: {node_id}",
+                    path=duplicates[0].path,
+                    node_id=node_id,
+                    details={"paths": paths},
+                )
+            )
+    for alias, owners in alias_records.items():
+        if len(owners) > 1 or alias in id_records:
+            diagnostics.append(
+                _diagnostic(
+                    "duplicate_alias",
+                    f"alias is not unique: {alias}",
+                    path=owners[0].path,
+                    node_id=owners[0].node_id,
+                    field="aliases",
+                )
+            )
+    for edge_id, duplicates in edge_records.items():
+        if len(duplicates) > 1:
+            diagnostics.append(
+                _diagnostic(
+                    "duplicate_edge_id",
+                    f"duplicate edge id: {edge_id}",
+                    path=duplicates[0][0].path,
+                    node_id=duplicates[0][0].node_id,
+                    edge_id=edge_id,
+                )
+            )
+
+    nodes = {node_id: owners[0] for node_id, owners in id_records.items()}
+    dependency_adjacency: dict[str, set[str]] = defaultdict(set)
+    decomposition_adjacency: dict[str, set[str]] = defaultdict(set)
+    for record in records:
+        source_id = record.node_id
+        source_kind = record.kind
+        if source_id is None:
+            continue
+        relations = record.metadata.get("relations", [])
+        if not isinstance(relations, list):
+            continue
+        instance_count = 0
+        provenance_count = 0
+        assesses_count = 0
+        basis_count = 0
+        for index, relation in enumerate(relations):
+            if not isinstance(relation, dict):
+                continue
+            edge_id = relation.get("id")
+            target_id = relation.get("target")
+            try:
+                edge_kind = EdgeKind(relation.get("kind"))
+            except (TypeError, ValueError):
+                continue
+            if edge_kind is EdgeKind.INSTANCE_OF:
+                instance_count += 1
+            elif edge_kind is EdgeKind.DERIVED_FROM:
+                provenance_count += 1
+            elif edge_kind is EdgeKind.ASSESSES:
+                assesses_count += 1
+            elif edge_kind is EdgeKind.BASED_ON:
+                basis_count += 1
+            if target_id == source_id and edge_kind not in {EdgeKind.RELATED_TO}:
+                diagnostics.append(
+                    _diagnostic(
+                        "self_relation",
+                        "relation cannot target its source",
+                        path=record.path,
+                        node_id=source_id,
+                        edge_id=edge_id if isinstance(edge_id, str) else None,
+                        field=f"relations[{index}].target",
+                    )
+                )
+            if not isinstance(target_id, str) or target_id not in nodes:
+                if isinstance(target_id, str):
+                    diagnostics.append(
+                        _diagnostic(
+                            "dangling_relation",
+                            "Relation target does not exist",
+                            path=record.path,
+                            node_id=source_id,
+                            edge_id=edge_id if isinstance(edge_id, str) else None,
+                            field=f"relations[{index}].target",
+                            suggestion="Create the target or remove the relation",
+                            details={"target": target_id},
+                        )
+                    )
+                continue
+            target = nodes[target_id]
+            target_kind = target.kind
+            if (
+                source_kind is not None
+                and target_kind is not None
+                and not relation_is_allowed(source_kind, edge_kind, target_kind)
+            ):
+                diagnostics.append(
+                    _diagnostic(
+                        "relation_kind_mismatch",
+                        "source and target kinds are invalid for relation",
+                        path=record.path,
+                        node_id=source_id,
+                        edge_id=edge_id if isinstance(edge_id, str) else None,
+                        field=f"relations[{index}].kind",
+                    )
+                )
+            if target.metadata.get("status") == "archived":
+                diagnostics.append(
+                    _diagnostic(
+                        "archived_target",
+                        "relation targets an archived node",
+                        path=record.path,
+                        node_id=source_id,
+                        edge_id=edge_id if isinstance(edge_id, str) else None,
+                        field=f"relations[{index}].target",
+                        severity=DiagnosticSeverity.WARNING,
+                    )
+                )
+            if edge_kind is EdgeKind.DEPENDS_ON:
+                dependency_adjacency[source_id].add(target_id)
+            elif edge_kind is EdgeKind.DECOMPOSES:
+                decomposition_adjacency[source_id].add(target_id)
+
+        if source_kind is NodeKind.RUN and instance_count != 1:
+            diagnostics.append(
+                _diagnostic(
+                    "invalid_instance_of_count",
+                    "run must have exactly one instance_of relation",
+                    path=record.path,
+                    node_id=source_id,
+                    field="relations",
+                )
+            )
+        if (
+            source_kind is NodeKind.EVIDENCE
+            and require_evidence_provenance
+            and provenance_count == 0
+        ):
+            diagnostics.append(
+                _diagnostic(
+                    "evidence_provenance_required",
+                    "evidence requires a derived_from relation",
+                    path=record.path,
+                    node_id=source_id,
+                    field="relations",
+                )
+            )
+        if source_kind is NodeKind.ASSESSMENT:
+            if assesses_count == 0:
+                diagnostics.append(
+                    _diagnostic(
+                        "assessment_target_required",
+                        "assessment requires an assesses relation",
+                        path=record.path,
+                        node_id=source_id,
+                        field="relations",
+                    )
+                )
+            if basis_count == 0:
+                diagnostics.append(
+                    _diagnostic(
+                        "assessment_basis_required",
+                        "assessment requires at least one based_on relation",
+                        path=record.path,
+                        node_id=source_id,
+                        field="relations",
+                    )
+                )
+
+    if forbid_dependency_cycles:
+        for cycle in _cycles(dependency_adjacency):
+            diagnostics.append(
+                _diagnostic(
+                    "dependency_cycle",
+                    "depends_on relations contain a cycle",
+                    details={"cycle": cycle},
+                )
+            )
+    for cycle in _cycles(decomposition_adjacency):
+        diagnostics.append(
+            _diagnostic(
+                "decomposition_cycle",
+                "decomposes relations contain a cycle",
+                details={"cycle": cycle},
+            )
+        )
+
+
+def validate_project(path: Path) -> tuple[Diagnostic, ...]:
+    project = discover_project(path)
+    codec = MarkdownCodec()
+    diagnostics: list[Diagnostic] = []
+    records: list[_Record] = []
+    for node_path in discover_node_files(project):
+        relative_path = node_path.relative_to(project.root)
+        try:
+            text = node_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            diagnostics.append(
+                _diagnostic(
+                    "file_read_error",
+                    str(error),
+                    path=relative_path,
+                )
+            )
+            continue
+        try:
+            document = codec.decode(text, path=node_path)
+        except MarkdownCodecError as error:
+            diagnostics.append(_diagnostic(error.code, str(error), path=relative_path))
+            continue
+        record = _Record(path=relative_path, metadata=dict(document.metadata))
+        records.append(record)
+        _validate_structural(record, diagnostics)
+
+    _validate_global(
+        records,
+        diagnostics,
+        root=project.root,
+        require_evidence_provenance=project.config.policies.require_evidence_provenance,
+        forbid_dependency_cycles=project.config.policies.forbid_dependency_cycles,
+    )
+    return tuple(
+        sorted(
+            diagnostics,
+            key=lambda item: (
+                str(item.path or ""),
+                item.node_id or "",
+                item.edge_id or "",
+                item.field or "",
+                item.code,
+            ),
+        )
+    )

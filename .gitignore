@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+.agent-monitor/
+
+AGENTS.md
+CLAUDE.md
+.mcp.json
+.claude
+.codex
