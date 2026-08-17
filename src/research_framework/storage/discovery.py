@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from research_framework.domain.errors import (
     ProjectNotFound,
@@ -10,6 +11,8 @@ from research_framework.domain.errors import (
 )
 
 from .yaml_codec import RestrictedYamlError, load_restricted_yaml
+
+_PROJECT_ID = re.compile(r"^prj-[0-9A-HJKMNP-TV-Z]{26}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +74,10 @@ def _read_config(path: Path) -> ProjectConfig:
                 f"project config field {field} must be a non-blank string"
             )
 
+    project_id = raw["project_id"]
+    if _PROJECT_ID.fullmatch(project_id) is None:
+        raise StorageError("project_id must be prj- followed by a ULID")
+
     language = raw.get("default_language", "en")
     if not isinstance(language, str) or not language.strip():
         raise StorageError("default_language must be a non-blank string")
@@ -118,7 +125,7 @@ def discover_project(start: Path) -> DiscoveredProject:
 
     config = _read_config(config_path)
     vault_setting = Path(config.vault)
-    if vault_setting.is_absolute():
+    if vault_setting.is_absolute() or PureWindowsPath(config.vault).is_absolute():
         raise StorageError("vault must be a relative path inside the project root")
     root = config_path.parent.resolve()
     vault = (root / vault_setting).resolve()

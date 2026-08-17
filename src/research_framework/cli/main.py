@@ -3,10 +3,14 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
+import shlex
+import subprocess
 import sys
+import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Never
 
 from research_framework import (
     Actor,
@@ -31,6 +35,15 @@ from research_framework import (
     ValidationFailed,
 )
 from research_framework.domain.enums import DiagnosticSeverity, EdgeKind
+from research_framework.domain.graph import Edge, Node
+from research_framework.domain.nodes import NodeDraft
+from research_framework.presentation import (
+    render_edges,
+    render_neighborhood,
+    render_node,
+    render_nodes,
+    render_path,
+)
 from research_framework.validation import validate_project
 
 
@@ -39,7 +52,7 @@ class CliUsageError(ValueError):
 
 
 class Parser(argparse.ArgumentParser):
-    def error(self, message: str) -> None:
+    def error(self, message: str) -> Never:
         raise CliUsageError(message)
 
 
@@ -131,7 +144,7 @@ def _read_request(source: str | None) -> dict[str, Any]:
     return value
 
 
-_DRAFTS = {
+_DRAFTS: dict[str, type[NodeDraft]] = {
     "question": QuestionDraft,
     "hypothesis": HypothesisDraft,
     "claim": ClaimDraft,
@@ -145,7 +158,7 @@ _DRAFTS = {
 }
 
 
-def _draft(kind: str, data: Mapping[str, Any]) -> Any:
+def _draft(kind: str, data: Mapping[str, Any]) -> NodeDraft:
     constructor = _DRAFTS[kind]
     allowed = {field.name for field in dataclasses.fields(constructor)}
     values = {key: value for key, value in data.items() if key in allowed}
@@ -169,11 +182,16 @@ def _initial_relations(value: Any) -> tuple[RelationDraft, ...]:
         if unknown:
             field = min(unknown)
             raise CliUsageError(f"unknown initial_relations[{index}] field: {field}")
+        target = item.get("target")
+        if not isinstance(target, str):
+            raise CliUsageError(
+                f"invalid initial_relations[{index}]: target must be a string"
+            )
         try:
             result.append(
                 RelationDraft(
                     kind=EdgeKind(item.get("kind")),
-                    target=item.get("target"),
+                    target=target,
                     rationale=item.get("rationale"),
                 )
             )
@@ -197,7 +215,48 @@ def _flag_relations(args: argparse.Namespace) -> tuple[RelationDraft, ...]:
     return tuple(relations)
 
 
-def _node_to_dict(node: Any, *, detail: bool = True) -> dict[str, Any]:
+def _human_body(args: argparse.Namespace) -> str | None:
+    body: object = args.body
+    if isinstance(body, str):
+        return body
+    body_file: object = args.body_file
+    if isinstance(body_file, str):
+        try:
+            return Path(body_file).read_text(encoding="utf-8")
+        except OSError as error:
+            raise CliUsageError(f"cannot read body file: {error}") from error
+    if not args.edit:
+        return None
+
+    editor_value = os.environ.get("EDITOR")
+    if not editor_value:
+        raise CliUsageError("--edit requires the EDITOR environment variable")
+    try:
+        command = shlex.split(editor_value)
+    except ValueError as error:
+        raise CliUsageError(f"invalid EDITOR value: {error}") from error
+    if not command:
+        raise CliUsageError("EDITOR must contain a command")
+
+    with tempfile.TemporaryDirectory(prefix="rf-editor-") as directory:
+        body_path = Path(directory) / "body.md"
+        body_path.write_text("", encoding="utf-8")
+        try:
+            result = subprocess.run(
+                [*command, str(body_path)],
+                check=False,
+            )
+        except OSError as error:
+            raise CliUsageError(f"cannot start editor: {error}") from error
+        if result.returncode != 0:
+            raise CliUsageError(f"editor exited with status {result.returncode}")
+        try:
+            return body_path.read_text(encoding="utf-8")
+        except OSError as error:
+            raise CliUsageError(f"cannot read edited body: {error}") from error
+
+
+def _node_to_dict(node: Node, *, detail: bool = True) -> dict[str, Any]:
     return node.to_dict(include_body=detail, include_revision=detail)
 
 
@@ -243,6 +302,10 @@ def _build_parser() -> Parser:
     create.add_argument("--based-on", action="append")
     create.add_argument("--tag", action="append", dest="tags")
     create.add_argument("--alias", action="append", dest="aliases")
+    body = create.add_mutually_exclusive_group()
+    body.add_argument("--body")
+    body.add_argument("--body-file")
+    body.add_argument("--edit", action="store_true")
     create.add_argument("--actor")
     create.add_argument("--json", action="store_true")
 
@@ -322,8 +385,9 @@ def _build_parser() -> Parser:
     return parser
 
 
-def _handle(args: argparse.Namespace) -> int | None:
+def _handle(args: argparse.Namespace) -> int:
     cwd = Path.cwd()
+    data: Any
     if args.command == "init":
         project = Project.init(
             Path(args.path),
@@ -332,7 +396,7 @@ def _handle(args: argparse.Namespace) -> int | None:
         )
         data = {"root": str(project.root)}
         _success(data) if args.json else print(f"Initialized {project.root}")
-        return
+        return 0
 
     if args.command == "validate":
         diagnostics = validate_project(cwd)
@@ -359,7 +423,7 @@ def _handle(args: argparse.Namespace) -> int | None:
             _success(data, warnings)
         else:
             print("Project is valid")
-        return
+        return 0
 
     if args.command == "format":
         project = Project.open(cwd)
@@ -389,7 +453,7 @@ def _handle(args: argparse.Namespace) -> int | None:
             json_mode=args.json,
             message=message,
         )
-        return
+        return 0
 
     project = Project.open(cwd)
     graph = project.snapshot()
@@ -398,7 +462,7 @@ def _handle(args: argparse.Namespace) -> int | None:
         if args.node_command == "show":
             node = graph.get_node(args.reference)
             data = _node_to_dict(node)
-            _success(data) if args.json else print(f"{node.id} {node.title}")
+            _success(data) if args.json else print(render_node(node))
         elif args.node_command == "list":
             nodes = graph.list_nodes(
                 kind=args.kind,
@@ -406,11 +470,13 @@ def _handle(args: argparse.Namespace) -> int | None:
                 tags=set(args.tags or ()),
             )
             data = [_node_to_dict(node, detail=False) for node in nodes]
-            _success(data) if args.json else [
-                print(f"{node.id} {node.title}") for node in nodes
-            ]
+            _success(data) if args.json else print(render_nodes(nodes))
         elif args.node_command == "create":
             if args.from_json is not None:
+                if args.body is not None or args.body_file is not None or args.edit:
+                    raise CliUsageError(
+                        "--from-json cannot be combined with body input flags"
+                    )
                 request = _read_request(args.from_json)
                 actor = _actor(request.pop("actor", {}))
                 relations = _initial_relations(request.pop("initial_relations", []))
@@ -418,8 +484,11 @@ def _handle(args: argparse.Namespace) -> int | None:
             else:
                 if args.json and args.title is None:
                     raise CliUsageError("node input is required in JSON mode")
+                if args.json and args.edit:
+                    raise CliUsageError("--edit is not available in JSON mode")
                 actor = _human_actor(args.actor)
                 relations = _flag_relations(args)
+                body_value = _human_body(args)
                 values = {
                     key: value
                     for key, value in vars(args).items()
@@ -451,6 +520,8 @@ def _handle(args: argparse.Namespace) -> int | None:
                     }
                     and value is not None
                 }
+                if body_value is not None:
+                    values["body"] = body_value
             created = project.create_node(
                 _draft(args.kind, values),
                 actor=actor,
@@ -491,7 +562,7 @@ def _handle(args: argparse.Namespace) -> int | None:
                 json_mode=args.json,
                 message=f"Archived {archived.id}",
             )
-        return
+        return 0
 
     if args.command == "link":
         if args.link_command == "add":
@@ -506,9 +577,11 @@ def _handle(args: argparse.Namespace) -> int | None:
                 source, kind, target = args.source, args.kind, args.target
                 rationale = args.rationale
                 actor = _human_actor(args.actor)
-            if not all(
-                isinstance(item, str) and item for item in (source, kind, target)
-            ):
+            if not isinstance(source, str) or not source:
+                raise CliUsageError("source, kind, and target are required")
+            if not isinstance(kind, str) or not kind:
+                raise CliUsageError("source, kind, and target are required")
+            if not isinstance(target, str) or not target:
                 raise CliUsageError("source, kind, and target are required")
             edge = project.add_edge(
                 source=source,
@@ -525,16 +598,15 @@ def _handle(args: argparse.Namespace) -> int | None:
                 message=f"Created {edge.id}",
             )
         elif args.link_command == "list":
-            edges = []
+            listed_edges: list[Edge] = []
             if args.direction in {"outgoing", "both"}:
-                edges.extend(graph.outgoing(args.reference))
+                listed_edges.extend(graph.outgoing(args.reference))
             if args.direction in {"incoming", "both"}:
-                edges.extend(graph.incoming(args.reference))
-            unique = {edge.id: edge for edge in edges}
+                listed_edges.extend(graph.incoming(args.reference))
+            unique = {edge.id: edge for edge in listed_edges}
             data = [unique[edge_id].to_dict() for edge_id in sorted(unique)]
-            _success(data) if args.json else [
-                print(f"{item['id']} {item['kind']}") for item in data
-            ]
+            listed = tuple(unique[edge_id] for edge_id in sorted(unique))
+            _success(data) if args.json else print(render_edges(listed))
         elif args.link_command == "remove":
             project.remove_edge(args.edge_id, actor=_human_actor(args.actor))
             data = {"id": args.edge_id, "removed": True}
@@ -544,20 +616,28 @@ def _handle(args: argparse.Namespace) -> int | None:
                 json_mode=args.json,
                 message=f"Removed {args.edge_id}",
             )
-        return
+        return 0
 
     if args.command == "graph":
         if args.graph_command == "show":
             center = graph.get_node(args.reference)
-            edges = {
+            adjacent_edges = {
                 edge.id: edge
                 for edge in (*graph.outgoing(center.id), *graph.incoming(center.id))
             }
             data = {
                 "center": _node_to_dict(center, detail=False),
-                "edges": [edges[edge_id].to_dict() for edge_id in sorted(edges)],
+                "edges": [
+                    adjacent_edges[edge_id].to_dict()
+                    for edge_id in sorted(adjacent_edges)
+                ],
             }
-            _success(data) if args.json else print(f"{center.id}: {len(edges)} edges")
+            adjacent = tuple(
+                adjacent_edges[edge_id] for edge_id in sorted(adjacent_edges)
+            )
+            _success(data) if args.json else print(
+                render_neighborhood(graph, center, adjacent)
+            )
         elif args.graph_command == "traverse":
             nodes = graph.traverse(
                 args.reference,
@@ -565,18 +645,18 @@ def _handle(args: argparse.Namespace) -> int | None:
                 direction=args.direction,
             )
             data = {"nodes": [_node_to_dict(node, detail=False) for node in nodes]}
-            _success(data) if args.json else [
-                print(f"{node.id} {node.title}") for node in nodes
-            ]
+            _success(data) if args.json else print(render_nodes(nodes))
         elif args.graph_command == "path":
-            path = graph.find_path(args.source, args.target)
-            data = {"edges": [edge.to_dict() for edge in (path or ())]}
+            graph_path = graph.find_path(args.source, args.target)
+            data = {"edges": [edge.to_dict() for edge in (graph_path or ())]}
             _success(data) if args.json else print(
-                " -> ".join(edge.id for edge in (path or ()))
+                render_path(graph, args.source, graph_path)
             )
         elif args.graph_command == "export":
             sys.stdout.write(graph.export_json())
-        return
+        return 0
+
+    raise CliUsageError(f"unsupported command: {args.command}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -584,8 +664,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     json_mode = "--json" in arguments
     try:
         args = _build_parser().parse_args(arguments)
-        exit_code = _handle(args)
-        return 0 if exit_code is None else exit_code
+        return _handle(args)
     except CliUsageError as error:
         if json_mode:
             _error("invalid_arguments", str(error))

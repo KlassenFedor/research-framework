@@ -4,7 +4,7 @@ import re
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +38,8 @@ _NODE_PREFIXES = {
 }
 _NODE_ID = re.compile(rf"^(?:{'|'.join(_NODE_PREFIXES.values())})-{_ULID}$")
 _EDGE_ID = re.compile(rf"^rel-{_ULID}$")
+_DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+_TIMEZONE_SUFFIX = re.compile(r"(?:Z|[+-][0-9]{2}:[0-9]{2})$")
 
 _COMMON_FIELDS = {
     "format_version",
@@ -181,7 +183,62 @@ def _parse_datetime(
             )
         )
         return None
+    if _TIMEZONE_SUFFIX.search(value) is None:
+        diagnostics.append(
+            _diagnostic(
+                "invalid_timestamp",
+                f"{field} must end with Z or a ±HH:MM timezone offset",
+                path=record.path,
+                node_id=record.node_id,
+                field=field,
+            )
+        )
+        return None
     return parsed
+
+
+def _parse_date(
+    value: Any,
+    *,
+    field: str,
+    record: _Record,
+    diagnostics: list[Diagnostic],
+) -> date | None:
+    if not isinstance(value, str):
+        diagnostics.append(
+            _diagnostic(
+                "invalid_field_type",
+                f"{field} must be an ISO 8601 date string",
+                path=record.path,
+                node_id=record.node_id,
+                field=field,
+            )
+        )
+        return None
+    if _DATE.fullmatch(value) is None:
+        diagnostics.append(
+            _diagnostic(
+                "invalid_date",
+                f"{field} must use YYYY-MM-DD format",
+                path=record.path,
+                node_id=record.node_id,
+                field=field,
+            )
+        )
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        diagnostics.append(
+            _diagnostic(
+                "invalid_date",
+                f"{field} is not a valid ISO 8601 date",
+                path=record.path,
+                node_id=record.node_id,
+                field=field,
+            )
+        )
+        return None
 
 
 def _validate_actor(
@@ -202,6 +259,17 @@ def _validate_actor(
             )
         )
         return
+    allowed = {"kind", "id", "run_id", "model"}
+    for unknown in sorted(set(actor) - allowed):
+        diagnostics.append(
+            _diagnostic(
+                "unknown_field",
+                f"unknown actor field: {unknown}",
+                path=record.path,
+                node_id=record.node_id,
+                field=f"{field}.{unknown}",
+            )
+        )
     if actor.get("kind") not in {"human", "agent"}:
         diagnostics.append(
             _diagnostic(
@@ -223,6 +291,20 @@ def _validate_actor(
                 field=f"{field}.id",
             )
         )
+    for optional in ("run_id", "model"):
+        if optional not in actor:
+            continue
+        value = actor[optional]
+        if not isinstance(value, str) or not value.strip():
+            diagnostics.append(
+                _diagnostic(
+                    "invalid_field_type",
+                    f"{field}.{optional} must be a non-blank string",
+                    path=record.path,
+                    node_id=record.node_id,
+                    field=f"{field}.{optional}",
+                )
+            )
 
 
 def _validate_string_list(
@@ -246,6 +328,30 @@ def _validate_string_list(
         )
         return None
     return value
+
+
+def _validate_text_field(
+    metadata: Mapping[str, Any],
+    *,
+    field: str,
+    record: _Record,
+    diagnostics: list[Diagnostic],
+    non_blank: bool = True,
+) -> None:
+    if field not in metadata:
+        return
+    value = metadata[field]
+    if not isinstance(value, str) or (non_blank and not value.strip()):
+        qualifier = "non-blank " if non_blank else ""
+        diagnostics.append(
+            _diagnostic(
+                "invalid_field_type",
+                f"{field} must be a {qualifier}string",
+                path=record.path,
+                node_id=record.node_id,
+                field=field,
+            )
+        )
 
 
 def _validate_structural(record: _Record, diagnostics: list[Diagnostic]) -> None:
@@ -279,7 +385,8 @@ def _validate_structural(record: _Record, diagnostics: list[Diagnostic]) -> None
             )
         )
 
-    if metadata.get("format_version") != 1:
+    version = metadata.get("format_version")
+    if not isinstance(version, int) or isinstance(version, bool) or version != 1:
         diagnostics.append(
             _diagnostic(
                 "unsupported_format_version",
@@ -336,11 +443,7 @@ def _validate_structural(record: _Record, diagnostics: list[Diagnostic]) -> None
         )
 
     for field in ("title", "summary"):
-        if (
-            field in metadata
-            and metadata[field] is not None
-            and not isinstance(metadata[field], str)
-        ):
+        if field in metadata and not isinstance(metadata[field], str):
             diagnostics.append(
                 _diagnostic(
                     "invalid_field_type",
@@ -352,12 +455,12 @@ def _validate_structural(record: _Record, diagnostics: list[Diagnostic]) -> None
             )
 
     tags = metadata.get("tags")
-    if tags is not None:
+    if "tags" in metadata:
         _validate_string_list(
             tags, field="tags", record=record, diagnostics=diagnostics
         )
     aliases = metadata.get("aliases")
-    if aliases is not None:
+    if "aliases" in metadata:
         valid_aliases = _validate_string_list(
             aliases, field="aliases", record=record, diagnostics=diagnostics
         )
@@ -408,7 +511,7 @@ def _validate_structural(record: _Record, diagnostics: list[Diagnostic]) -> None
     )
 
     extensions = metadata.get("extensions")
-    if extensions is not None and not isinstance(extensions, dict):
+    if "extensions" in metadata and not isinstance(extensions, dict):
         diagnostics.append(
             _diagnostic(
                 "invalid_field_type",
@@ -426,6 +529,57 @@ def _validate_structural(record: _Record, diagnostics: list[Diagnostic]) -> None
 def _validate_kind_fields(record: _Record, diagnostics: list[Diagnostic]) -> None:
     metadata = record.metadata
     kind = record.kind
+    text_fields: dict[NodeKind, tuple[tuple[str, bool], ...]] = {
+        NodeKind.QUESTION: (("question", True), ("scope", False)),
+        NodeKind.HYPOTHESIS: (
+            ("statement", True),
+            ("falsification_criteria", True),
+        ),
+        NodeKind.CLAIM: (("statement", True),),
+        NodeKind.EXPERIMENT: (
+            ("objective", True),
+            ("method", True),
+            ("success_criteria", True),
+        ),
+        NodeKind.EVIDENCE: (("observation", True),),
+        NodeKind.SOURCE: (("locator", True), ("citation", False)),
+        NodeKind.ARTIFACT: (("locator", True), ("media_type", True)),
+        NodeKind.DECISION: (("outcome", True), ("rationale", True)),
+    }
+    if kind is not None:
+        for field, non_blank in text_fields.get(kind, ()):
+            _validate_text_field(
+                metadata,
+                field=field,
+                record=record,
+                diagnostics=diagnostics,
+                non_blank=non_blank,
+            )
+
+    if kind is NodeKind.HYPOTHESIS:
+        assumptions = metadata.get("assumptions")
+        if "assumptions" in metadata:
+            _validate_string_list(
+                assumptions,
+                field="assumptions",
+                record=record,
+                diagnostics=diagnostics,
+            )
+    elif kind is NodeKind.EXPERIMENT:
+        protocol = metadata.get("protocol_version")
+        if not (
+            (isinstance(protocol, int) and not isinstance(protocol, bool))
+            or (isinstance(protocol, str) and bool(protocol.strip()))
+        ):
+            diagnostics.append(
+                _diagnostic(
+                    "invalid_protocol_version",
+                    "protocol_version must be an integer or non-blank string",
+                    path=record.path,
+                    node_id=record.node_id,
+                    field="protocol_version",
+                )
+            )
     if kind is NodeKind.RUN:
         outcome = metadata.get("outcome")
         if outcome not in {"running", "completed", "failed", "cancelled"}:
@@ -446,7 +600,7 @@ def _validate_kind_fields(record: _Record, diagnostics: list[Diagnostic]) -> Non
         )
         finished_value = metadata.get("finished_at")
         finished = None
-        if finished_value is not None:
+        if "finished_at" in metadata:
             finished = _parse_datetime(
                 finished_value,
                 field="finished_at",
@@ -473,6 +627,17 @@ def _validate_kind_fields(record: _Record, diagnostics: list[Diagnostic]) -> Non
                     field="finished_at",
                 )
             )
+        environment = metadata.get("environment")
+        if "environment" in metadata and not isinstance(environment, dict):
+            diagnostics.append(
+                _diagnostic(
+                    "invalid_field_type",
+                    "environment must be a mapping",
+                    path=record.path,
+                    node_id=record.node_id,
+                    field="environment",
+                )
+            )
     elif kind is NodeKind.EVIDENCE:
         if metadata.get("evidence_kind") not in {
             "quantitative",
@@ -489,6 +654,14 @@ def _validate_kind_fields(record: _Record, diagnostics: list[Diagnostic]) -> Non
                     node_id=record.node_id,
                     field="evidence_kind",
                 )
+            )
+        collected_at = metadata.get("collected_at")
+        if "collected_at" in metadata:
+            _parse_datetime(
+                collected_at,
+                field="collected_at",
+                record=record,
+                diagnostics=diagnostics,
             )
     elif kind is NodeKind.ASSESSMENT:
         checks = (
@@ -515,6 +688,14 @@ def _validate_kind_fields(record: _Record, diagnostics: list[Diagnostic]) -> Non
                         field=field,
                     )
                 )
+        limitations = metadata.get("limitations")
+        if "limitations" in metadata:
+            _validate_string_list(
+                limitations,
+                field="limitations",
+                record=record,
+                diagnostics=diagnostics,
+            )
     elif kind is NodeKind.SOURCE:
         if metadata.get("source_kind") not in {
             "paper",
@@ -533,9 +714,17 @@ def _validate_kind_fields(record: _Record, diagnostics: list[Diagnostic]) -> Non
                     field="source_kind",
                 )
             )
+        accessed_at = metadata.get("accessed_at")
+        if "accessed_at" in metadata:
+            _parse_date(
+                accessed_at,
+                field="accessed_at",
+                record=record,
+                diagnostics=diagnostics,
+            )
     elif kind is NodeKind.ARTIFACT:
         sha256 = metadata.get("sha256")
-        if sha256 is not None and (
+        if "sha256" in metadata and (
             not isinstance(sha256, str)
             or re.fullmatch(r"[0-9a-fA-F]{64}", sha256) is None
         ):
@@ -549,7 +738,7 @@ def _validate_kind_fields(record: _Record, diagnostics: list[Diagnostic]) -> Non
                 )
             )
         size = metadata.get("size")
-        if size is not None and (
+        if "size" in metadata and (
             not isinstance(size, int) or isinstance(size, bool) or size < 0
         ):
             diagnostics.append(
@@ -589,6 +778,17 @@ def _validate_relations(record: _Record, diagnostics: list[Diagnostic]) -> None:
                 )
             )
             continue
+        allowed = {"id", "kind", "target", "rationale", "created_at", "created_by"}
+        for unknown in sorted(set(relation) - allowed):
+            diagnostics.append(
+                _diagnostic(
+                    "unknown_field",
+                    f"unknown relation field: {unknown}",
+                    path=record.path,
+                    node_id=record.node_id,
+                    field=f"{prefix}.{unknown}",
+                )
+            )
         edge_id = relation.get("id")
         if not isinstance(edge_id, str) or _EDGE_ID.fullmatch(edge_id) is None:
             diagnostics.append(
@@ -615,15 +815,29 @@ def _validate_relations(record: _Record, diagnostics: list[Diagnostic]) -> None:
                 )
             )
         target = relation.get("target")
-        if not isinstance(target, str) or not target:
+        if not isinstance(target, str) or _NODE_ID.fullmatch(target) is None:
             diagnostics.append(
                 _diagnostic(
-                    "invalid_field_type",
-                    "relation target must be a node id",
+                    "invalid_relation_target",
+                    "relation target must be a typed node ID",
                     path=record.path,
                     node_id=record.node_id,
                     edge_id=edge_id if isinstance(edge_id, str) else None,
                     field=f"{prefix}.target",
+                )
+            )
+        rationale = relation.get("rationale")
+        if "rationale" in relation and (
+            not isinstance(rationale, str) or not rationale.strip()
+        ):
+            diagnostics.append(
+                _diagnostic(
+                    "invalid_field_type",
+                    "relation rationale must be a non-blank string",
+                    path=record.path,
+                    node_id=record.node_id,
+                    edge_id=edge_id if isinstance(edge_id, str) else None,
+                    field=f"{prefix}.rationale",
                 )
             )
         _parse_datetime(
@@ -692,14 +906,14 @@ def _validate_global(
                 if isinstance(relation, dict) and isinstance(relation.get("id"), str):
                     edge_records[relation["id"]].append((record, index, relation))
 
-    for node_id, duplicates in id_records.items():
-        if len(duplicates) > 1:
-            paths = sorted(str(record.path) for record in duplicates)
+    for node_id, node_duplicates in id_records.items():
+        if len(node_duplicates) > 1:
+            paths = sorted(str(record.path) for record in node_duplicates)
             diagnostics.append(
                 _diagnostic(
                     "duplicate_node_id",
                     f"duplicate node id: {node_id}",
-                    path=duplicates[0].path,
+                    path=node_duplicates[0].path,
                     node_id=node_id,
                     details={"paths": paths},
                 )
@@ -715,14 +929,14 @@ def _validate_global(
                     field="aliases",
                 )
             )
-    for edge_id, duplicates in edge_records.items():
-        if len(duplicates) > 1:
+    for edge_id, edge_duplicates in edge_records.items():
+        if len(edge_duplicates) > 1:
             diagnostics.append(
                 _diagnostic(
                     "duplicate_edge_id",
                     f"duplicate edge id: {edge_id}",
-                    path=duplicates[0][0].path,
-                    node_id=duplicates[0][0].node_id,
+                    path=edge_duplicates[0][0].path,
+                    node_id=edge_duplicates[0][0].node_id,
                     edge_id=edge_id,
                 )
             )
@@ -745,7 +959,7 @@ def _validate_global(
         for index, relation in enumerate(relations):
             if not isinstance(relation, dict):
                 continue
-            edge_id = relation.get("id")
+            relation_id = relation.get("id")
             target_id = relation.get("target")
             try:
                 edge_kind = EdgeKind(relation.get("kind"))
@@ -766,7 +980,7 @@ def _validate_global(
                         "relation cannot target its source",
                         path=record.path,
                         node_id=source_id,
-                        edge_id=edge_id if isinstance(edge_id, str) else None,
+                        edge_id=relation_id if isinstance(relation_id, str) else None,
                         field=f"relations[{index}].target",
                     )
                 )
@@ -778,7 +992,9 @@ def _validate_global(
                             "Relation target does not exist",
                             path=record.path,
                             node_id=source_id,
-                            edge_id=edge_id if isinstance(edge_id, str) else None,
+                            edge_id=(
+                                relation_id if isinstance(relation_id, str) else None
+                            ),
                             field=f"relations[{index}].target",
                             suggestion="Create the target or remove the relation",
                             details={"target": target_id},
@@ -798,7 +1014,7 @@ def _validate_global(
                         "source and target kinds are invalid for relation",
                         path=record.path,
                         node_id=source_id,
-                        edge_id=edge_id if isinstance(edge_id, str) else None,
+                        edge_id=(relation_id if isinstance(relation_id, str) else None),
                         field=f"relations[{index}].kind",
                     )
                 )
@@ -809,7 +1025,7 @@ def _validate_global(
                         "relation targets an archived node",
                         path=record.path,
                         node_id=source_id,
-                        edge_id=edge_id if isinstance(edge_id, str) else None,
+                        edge_id=(relation_id if isinstance(relation_id, str) else None),
                         field=f"relations[{index}].target",
                         severity=DiagnosticSeverity.WARNING,
                     )

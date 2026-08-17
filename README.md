@@ -4,6 +4,7 @@ Git-native, text-first research graph with Markdown/YAML storage, an immutable
 in-memory graph, validation, a public Python API and the `rf` CLI.
 
 - Architecture: [`docs/architecture.md`](docs/architecture.md)
+- User workflow: [`docs/workflow.md`](docs/workflow.md)
 - Testing contract: [`docs/testing.md`](docs/testing.md)
 
 Versioned JSON Schema Draft 2020-12 contracts are bundled with the package and
@@ -24,6 +25,7 @@ Run the complete contract suite:
 uv run pytest
 uv run ruff check src tests
 uv run ruff format --check src tests
+uv run mypy
 ```
 
 Create and inspect a project:

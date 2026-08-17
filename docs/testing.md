@@ -19,7 +19,8 @@
 | Storage | Candidate prevalidation, atomic write/rollback, revision conflict, локальность diff, защита путей |
 | Formatting | Read-only check, canonical front matter, byte-exact body, idempotence, rollback, concurrent edits |
 | Python API | Init/open, atomic mutations, operation diagnostics, snapshots |
-| CLI | Human/JSON warnings, initial relation flags, stdin, стабильные схемы и exit codes |
+| CLI | Human/JSON warnings, таблицы/графы, `$EDITOR`, initial relations, stdin и exit codes |
+| Git acceptance | Реальные diff для create/update/link/remove/archive/format и локальность файлов |
 | End-to-end | `init → create → link → reopen → traverse → validate → export` |
 
 ## Fixture-проект
@@ -47,11 +48,12 @@
 
 ## Текущий статус
 
-На 2026-08-17 pytest собирает и успешно выполняет 330 сценариев:
+На 2026-08-17 pytest собирает и успешно выполняет 383 сценария:
 
 ```text
-330 passed
+383 passed
 ```
 
-Дополнительно проходят Ruff, Ruff format check, `compileall`, сборка пакета и
+Branch coverage составляет 72,52% при обязательном пороге 70%. Дополнительно
+проходят strict mypy, Ruff, Ruff format check, `compileall`, сборка пакета и
 smoke-test установленного `rf` entrypoint.

@@ -22,9 +22,11 @@ packages = ["src/research_framework"]
 [dependency-groups]
 dev = [
   "jsonschema>=4.26.0",
+  "mypy>=2.3.1",
   "pytest>=8.3",
   "pytest-cov>=6.0",
   "ruff>=0.12",
+  "types-pyyaml>=6.0.12.20260815",
 ]
 
 [tool.pytest.ini_options]
@@ -53,3 +55,11 @@ skip_covered = true
 # CLI contract tests intentionally execute a separate Python process, so their
 # lines are not attributed to the parent coverage process.
 fail_under = 70
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src"]
+strict = true
+warn_unreachable = true
+show_error_codes = true
+pretty = true

@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ def run_cli(
     cwd: Path,
     *arguments: str,
     input_text: str | None = None,
+    environment_overrides: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     root = Path(__file__).parents[2]
     environment = os.environ.copy()
@@ -23,6 +25,7 @@ def run_cli(
         filter(None, [str(root / "src"), existing_pythonpath])
     )
     environment["NO_COLOR"] = "1"
+    environment.update(environment_overrides or {})
     return subprocess.run(
         [sys.executable, "-m", "research_framework", *arguments],
         cwd=cwd,
@@ -971,3 +974,214 @@ def test_init_command_creates_project_at_explicit_path(tmp_path: Path) -> None:
     assert result.returncode == 0
     assert payload["data"]["root"] == str(target.resolve())
     assert (target / "research.yaml").is_file()
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_node_show_human_mode_renders_metadata_and_body(
+    example_project: Path,
+) -> None:
+    result = run_cli(example_project, "node", "show", NODE_IDS["question"])
+
+    assert result.returncode == 0
+    assert f"ID:       {NODE_IDS['question']}" in result.stdout
+    assert "Kind:     question" in result.stdout
+    assert "Status:   active" in result.stdout
+    assert "Revision:" in result.stdout
+    assert "Body:" in result.stdout
+    assert "This is the root research question." in result.stdout
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_node_list_human_mode_renders_a_table(example_project: Path) -> None:
+    result = run_cli(example_project, "node", "list", "--kind", "hypothesis")
+
+    assert result.returncode == 0
+    assert all(column in result.stdout for column in ("ID", "KIND", "STATUS", "TITLE"))
+    assert NODE_IDS["hypothesis"] in result.stdout
+    assert "A larger context improves recall" in result.stdout
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_node_create_edit_opens_configured_editor_and_saves_body(
+    example_project: Path,
+    tmp_path: Path,
+) -> None:
+    editor = tmp_path / "editor.py"
+    editor.write_text(
+        "import pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text("
+        "'# Edited body\\n\\nWritten in the configured editor.\\n', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        example_project,
+        "node",
+        "create",
+        "claim",
+        "--title",
+        "Editor-created claim",
+        "--statement",
+        "The editor body is persisted.",
+        "--actor",
+        "author",
+        "--edit",
+        environment_overrides={"EDITOR": f"{sys.executable} {editor}"},
+    )
+
+    assert result.returncode == 0
+    created = next(
+        path
+        for path in (example_project / "research" / "claims").glob("*.md")
+        if "editor-created-claim" in path.name
+    )
+    assert created.read_text(encoding="utf-8").endswith(
+        "# Edited body\n\nWritten in the configured editor.\n"
+    )
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_node_create_edit_failure_does_not_create_a_node(
+    example_project: Path,
+    tmp_path: Path,
+) -> None:
+    editor = tmp_path / "failing-editor.py"
+    editor.write_text("raise SystemExit(7)\n", encoding="utf-8")
+    before = set((example_project / "research" / "claims").glob("*.md"))
+
+    result = run_cli(
+        example_project,
+        "node",
+        "create",
+        "claim",
+        "--title",
+        "Cancelled editor claim",
+        "--statement",
+        "This node must not be written.",
+        "--actor",
+        "author",
+        "--edit",
+        environment_overrides={"EDITOR": f"{sys.executable} {editor}"},
+    )
+
+    assert result.returncode == 2
+    assert "editor exited with status 7" in result.stderr
+    assert set((example_project / "research" / "claims").glob("*.md")) == before
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_node_create_reads_body_file(example_project: Path, tmp_path: Path) -> None:
+    body = tmp_path / "claim-body.md"
+    body.write_text("# Imported body\n\nKept as Markdown.\n", encoding="utf-8")
+
+    result = run_cli(
+        example_project,
+        "node",
+        "create",
+        "claim",
+        "--title",
+        "Body file claim",
+        "--statement",
+        "The body comes from a file.",
+        "--actor",
+        "author",
+        "--body-file",
+        str(body),
+    )
+
+    assert result.returncode == 0
+    created = next(
+        path
+        for path in (example_project / "research" / "claims").glob("*.md")
+        if "body-file-claim" in path.name
+    )
+    assert created.read_text(encoding="utf-8").endswith(
+        body.read_text(encoding="utf-8")
+    )
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_node_create_rejects_editor_in_json_mode(example_project: Path) -> None:
+    result = run_cli(
+        example_project,
+        "node",
+        "create",
+        "claim",
+        "--title",
+        "Interactive JSON claim",
+        "--statement",
+        "JSON output must stay machine-readable.",
+        "--actor",
+        "author",
+        "--edit",
+        "--json",
+    )
+
+    payload = json_stdout(result)
+    assert result.returncode == 2
+    assert payload["error"]["code"] == "invalid_arguments"
+    assert "--edit is not available in JSON mode" in payload["error"]["message"]
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_link_list_human_mode_renders_a_table(example_project: Path) -> None:
+    result = run_cli(
+        example_project,
+        "link",
+        "list",
+        NODE_IDS["hypothesis"],
+        "--direction",
+        "incoming",
+    )
+
+    assert result.returncode == 0
+    assert all(
+        column in result.stdout
+        for column in ("ID", "KIND", "SOURCE", "TARGET", "RATIONALE")
+    )
+    assert NODE_IDS["hypothesis"] in result.stdout
+    assert "supports" in result.stdout
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_graph_show_human_mode_renders_directional_neighborhood(
+    example_project: Path,
+) -> None:
+    result = run_cli(example_project, "graph", "show", NODE_IDS["hypothesis"])
+
+    assert result.returncode == 0
+    assert NODE_IDS["hypothesis"] in result.stdout
+    assert "A larger context improves recall" in result.stdout
+    assert "→" in result.stdout
+    assert "←" in result.stdout
+    assert "tests" in result.stdout
+    assert NODE_IDS["experiment"] in result.stdout
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_graph_path_human_mode_renders_nodes_and_relation_kinds(
+    example_project: Path,
+) -> None:
+    result = run_cli(
+        example_project,
+        "graph",
+        "path",
+        NODE_IDS["run"],
+        NODE_IDS["hypothesis"],
+    )
+
+    assert result.returncode == 0
+    assert NODE_IDS["run"] in result.stdout
+    assert NODE_IDS["experiment"] in result.stdout
+    assert NODE_IDS["hypothesis"] in result.stdout
+    assert "instance_of" in result.stdout
+    assert "tests" in result.stdout
