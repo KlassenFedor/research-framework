@@ -21,6 +21,7 @@ packages = ["src/research_framework"]
 
 [dependency-groups]
 dev = [
+  "jsonschema>=4.26.0",
   "pytest>=8.3",
   "pytest-cov>=6.0",
   "ruff>=0.12",

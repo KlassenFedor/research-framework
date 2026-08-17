@@ -560,6 +560,34 @@ Wiki-links в Markdown body удобны человеку, но не являю�
 - перед заменой новая версия полностью валидируется;
 - пути и symlinks не должны позволять запись за пределы vault.
 
+### 7.5. JSON Schema
+
+Файловый контракт `format_version: 1` опубликован как две JSON Schema Draft
+2020-12 внутри Python package:
+
+- `node-v1.schema.json` описывает декодированный YAML front matter всех десяти
+  Node kinds;
+- `project-v1.schema.json` описывает `research.yaml`.
+
+Схемы доступны без runtime-зависимости от JSON Schema validator:
+
+```python
+from research_framework import node_schema, project_schema
+
+node_contract = node_schema()
+project_contract = project_schema()
+```
+
+Каждый вызов возвращает независимый `dict`. Схемы фиксируют локальную структуру,
+required-поля, JSON-типы, ID patterns и enums. Они не проверяют уникальность ID
+между файлами, существование relation targets, relation matrix, policies и
+циклы: эти правила требуют снимка всего проекта и остаются ответственностью
+`Project.validate()` и `rf validate`.
+
+Schema resources версионируются вместе с файловым форматом. Изменение их
+допустимого контракта требует тех же правил совместимости и миграции, что и
+изменение YAML front matter.
+
 ## 8. Загрузка проекта и представление в памяти
 
 ### 8.1. Последовательность загрузки

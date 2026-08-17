@@ -32,6 +32,7 @@ from .domain.nodes import (
     RunDraft,
     SourceDraft,
 )
+from .schemas import node_schema, project_schema
 
 __all__ = [
     "Actor",
@@ -63,4 +64,6 @@ __all__ = [
     "StorageError",
     "UnsupportedFormatVersion",
     "ValidationFailed",
+    "node_schema",
+    "project_schema",
 ]

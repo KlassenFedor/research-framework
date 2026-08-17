@@ -1,0 +1,426 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:research-framework:schema:node:1",
+  "title": "Research Framework node front matter v1",
+  "oneOf": [
+    { "$ref": "#/$defs/question" },
+    { "$ref": "#/$defs/hypothesis" },
+    { "$ref": "#/$defs/claim" },
+    { "$ref": "#/$defs/experiment" },
+    { "$ref": "#/$defs/run" },
+    { "$ref": "#/$defs/evidence" },
+    { "$ref": "#/$defs/assessment" },
+    { "$ref": "#/$defs/source" },
+    { "$ref": "#/$defs/artifact" },
+    { "$ref": "#/$defs/decision" }
+  ],
+  "$defs": {
+    "nonBlankString": {
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "(?:Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "date": {
+      "type": "string",
+      "format": "date",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "nodeId": {
+      "type": "string",
+      "pattern": "^(?:que|hyp|clm|exp|run|evd|asm|src|art|dec)-[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": {
+          "enum": ["human", "agent"]
+        },
+        "id": {
+          "$ref": "#/$defs/nonBlankString"
+        },
+        "run_id": {
+          "$ref": "#/$defs/nonBlankString"
+        },
+        "model": {
+          "$ref": "#/$defs/nonBlankString"
+        }
+      }
+    },
+    "relation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "target", "created_at", "created_by"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^rel-[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "kind": {
+          "enum": [
+            "addresses",
+            "decomposes",
+            "depends_on",
+            "tests",
+            "instance_of",
+            "produces",
+            "derived_from",
+            "supports",
+            "challenges",
+            "contradicts",
+            "assesses",
+            "based_on",
+            "supersedes",
+            "related_to"
+          ]
+        },
+        "target": {
+          "$ref": "#/$defs/nodeId"
+        },
+        "rationale": {
+          "$ref": "#/$defs/nonBlankString"
+        },
+        "created_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "created_by": {
+          "$ref": "#/$defs/actor"
+        }
+      }
+    },
+    "stringList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/nonBlankString"
+      }
+    },
+    "common": {
+      "type": "object",
+      "required": [
+        "format_version",
+        "id",
+        "kind",
+        "title",
+        "status",
+        "created_at",
+        "created_by",
+        "updated_at",
+        "updated_by"
+      ],
+      "properties": {
+        "format_version": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/nodeId"
+        },
+        "kind": {
+          "enum": [
+            "question",
+            "hypothesis",
+            "claim",
+            "experiment",
+            "run",
+            "evidence",
+            "assessment",
+            "source",
+            "artifact",
+            "decision"
+          ]
+        },
+        "title": {
+          "$ref": "#/$defs/nonBlankString"
+        },
+        "status": {
+          "enum": ["draft", "active", "closed", "archived"]
+        },
+        "summary": {
+          "type": "string"
+        },
+        "tags": {
+          "$ref": "#/$defs/stringList"
+        },
+        "aliases": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/stringList"
+            },
+            {
+              "uniqueItems": true
+            }
+          ]
+        },
+        "created_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "created_by": {
+          "$ref": "#/$defs/actor"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "updated_by": {
+          "$ref": "#/$defs/actor"
+        },
+        "relations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/relation"
+          }
+        },
+        "extensions": {
+          "type": "object"
+        }
+      }
+    },
+    "question": {
+      "allOf": [
+        { "$ref": "#/$defs/common" },
+        {
+          "type": "object",
+          "required": ["question"],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^que-[0-9A-HJKMNP-TV-Z]{26}$"
+            },
+            "kind": { "const": "question" },
+            "question": { "$ref": "#/$defs/nonBlankString" },
+            "scope": { "type": "string" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "hypothesis": {
+      "allOf": [
+        { "$ref": "#/$defs/common" },
+        {
+          "type": "object",
+          "required": ["statement", "falsification_criteria"],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^hyp-[0-9A-HJKMNP-TV-Z]{26}$"
+            },
+            "kind": { "const": "hypothesis" },
+            "statement": { "$ref": "#/$defs/nonBlankString" },
+            "falsification_criteria": {
+              "$ref": "#/$defs/nonBlankString"
+            },
+            "assumptions": { "$ref": "#/$defs/stringList" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "claim": {
+      "allOf": [
+        { "$ref": "#/$defs/common" },
+        {
+          "type": "object",
+          "required": ["statement"],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^clm-[0-9A-HJKMNP-TV-Z]{26}$"
+            },
+            "kind": { "const": "claim" },
+            "statement": { "$ref": "#/$defs/nonBlankString" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "experiment": {
+      "allOf": [
+        { "$ref": "#/$defs/common" },
+        {
+          "type": "object",
+          "required": [
+            "objective",
+            "method",
+            "success_criteria",
+            "protocol_version"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^exp-[0-9A-HJKMNP-TV-Z]{26}$"
+            },
+            "kind": { "const": "experiment" },
+            "objective": { "$ref": "#/$defs/nonBlankString" },
+            "method": { "$ref": "#/$defs/nonBlankString" },
+            "success_criteria": { "$ref": "#/$defs/nonBlankString" },
+            "protocol_version": {
+              "oneOf": [
+                { "type": "integer" },
+                { "$ref": "#/$defs/nonBlankString" }
+              ]
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "run": {
+      "allOf": [
+        { "$ref": "#/$defs/common" },
+        {
+          "type": "object",
+          "required": ["started_at", "outcome"],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^run-[0-9A-HJKMNP-TV-Z]{26}$"
+            },
+            "kind": { "const": "run" },
+            "started_at": { "$ref": "#/$defs/timestamp" },
+            "finished_at": { "$ref": "#/$defs/timestamp" },
+            "outcome": {
+              "enum": ["running", "completed", "failed", "cancelled"]
+            },
+            "environment": { "type": "object" }
+          },
+          "if": {
+            "properties": {
+              "outcome": { "enum": ["completed", "failed", "cancelled"] }
+            },
+            "required": ["outcome"]
+          },
+          "then": {
+            "required": ["finished_at"]
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "evidence": {
+      "allOf": [
+        { "$ref": "#/$defs/common" },
+        {
+          "type": "object",
+          "required": ["observation", "evidence_kind"],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^evd-[0-9A-HJKMNP-TV-Z]{26}$"
+            },
+            "kind": { "const": "evidence" },
+            "observation": { "$ref": "#/$defs/nonBlankString" },
+            "evidence_kind": {
+              "enum": [
+                "quantitative",
+                "qualitative",
+                "citation",
+                "derived",
+                "other"
+              ]
+            },
+            "collected_at": { "$ref": "#/$defs/timestamp" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "assessment": {
+      "allOf": [
+        { "$ref": "#/$defs/common" },
+        {
+          "type": "object",
+          "required": ["verdict", "confidence", "review_state"],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^asm-[0-9A-HJKMNP-TV-Z]{26}$"
+            },
+            "kind": { "const": "assessment" },
+            "verdict": {
+              "enum": ["supported", "challenged", "refuted", "inconclusive"]
+            },
+            "confidence": { "enum": ["low", "medium", "high"] },
+            "limitations": { "$ref": "#/$defs/stringList" },
+            "review_state": {
+              "enum": ["proposed", "approved", "rejected"]
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "source": {
+      "allOf": [
+        { "$ref": "#/$defs/common" },
+        {
+          "type": "object",
+          "required": ["source_kind", "locator"],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^src-[0-9A-HJKMNP-TV-Z]{26}$"
+            },
+            "kind": { "const": "source" },
+            "source_kind": {
+              "enum": ["paper", "book", "dataset", "web", "interview", "other"]
+            },
+            "locator": { "$ref": "#/$defs/nonBlankString" },
+            "citation": { "type": "string" },
+            "accessed_at": { "$ref": "#/$defs/date" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "artifact": {
+      "allOf": [
+        { "$ref": "#/$defs/common" },
+        {
+          "type": "object",
+          "required": ["locator"],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^art-[0-9A-HJKMNP-TV-Z]{26}$"
+            },
+            "kind": { "const": "artifact" },
+            "locator": { "$ref": "#/$defs/nonBlankString" },
+            "media_type": { "$ref": "#/$defs/nonBlankString" },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{64}$"
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "decision": {
+      "allOf": [
+        { "$ref": "#/$defs/common" },
+        {
+          "type": "object",
+          "required": ["outcome", "rationale"],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^dec-[0-9A-HJKMNP-TV-Z]{26}$"
+            },
+            "kind": { "const": "decision" },
+            "outcome": { "$ref": "#/$defs/nonBlankString" },
+            "rationale": { "$ref": "#/$defs/nonBlankString" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    }
+  }
+}

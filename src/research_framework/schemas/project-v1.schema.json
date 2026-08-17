@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:research-framework:schema:project:1",
+  "title": "Research Framework project configuration v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format_version", "project_id", "title", "vault"],
+  "properties": {
+    "format_version": {
+      "const": 1
+    },
+    "project_id": {
+      "type": "string",
+      "pattern": "^prj-[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "title": {
+      "$ref": "#/$defs/nonBlankString"
+    },
+    "vault": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/nonBlankString"
+        },
+        {
+          "not": {
+            "pattern": "^(?:/|[A-Za-z]:[\\\\/])"
+          }
+        }
+      ]
+    },
+    "default_language": {
+      "$ref": "#/$defs/nonBlankString"
+    },
+    "policies": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "require_falsification_criteria": {
+          "type": "boolean"
+        },
+        "require_evidence_provenance": {
+          "type": "boolean"
+        },
+        "forbid_dependency_cycles": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "nonBlankString": {
+      "type": "string",
+      "pattern": "\\S"
+    }
+  }
+}

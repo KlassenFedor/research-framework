@@ -6,6 +6,9 @@ in-memory graph, validation, a public Python API and the `rf` CLI.
 - Architecture: [`docs/architecture.md`](docs/architecture.md)
 - Testing contract: [`docs/testing.md`](docs/testing.md)
 
+Versioned JSON Schema Draft 2020-12 contracts are bundled with the package and
+available through `research_framework.node_schema()` and `project_schema()`.
+
 ## Development
 
 Requires Python 3.11+ and [`uv`](https://docs.astral.sh/uv/).

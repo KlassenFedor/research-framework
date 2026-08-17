@@ -13,6 +13,7 @@
 | Relations | Полная матрица source/kind/target, `supersedes`, `related_to` |
 | Graph | ID/alias/prefix, индексы, filters, neighbors, BFS, shortest path, JSON |
 | Markdown codec | Golden files, body round-trip, порядок полей, restricted YAML 1.2 |
+| JSON Schema | Draft 2020-12, package resources, все Node kinds, config, enums и negative cases |
 | Discovery | Поиск от вложенного пути, границы vault, symlinks, детерминизм |
 | Validation | Syntax, structural, referential, semantic и graph diagnostics |
 | Storage | Candidate prevalidation, atomic write/rollback, revision conflict, локальность diff, защита путей |
@@ -46,10 +47,10 @@
 
 ## Текущий статус
 
-На 2026-08-17 pytest собирает и успешно выполняет 306 сценариев:
+На 2026-08-17 pytest собирает и успешно выполняет 330 сценариев:
 
 ```text
-306 passed
+330 passed
 ```
 
 Дополнительно проходят Ruff, Ruff format check, `compileall`, сборка пакета и
