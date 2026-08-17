@@ -1,6 +1,7 @@
 from .application import Project
 from .domain.actors import Actor
 from .domain.diagnostics import Diagnostic
+from .domain.edges import RelationDraft
 from .domain.enums import (
     ActorKind,
     DiagnosticSeverity,
@@ -53,6 +54,7 @@ __all__ = [
     "Project",
     "ProjectNotFound",
     "QuestionDraft",
+    "RelationDraft",
     "ResearchFrameworkError",
     "RevisionConflict",
     "RunDraft",

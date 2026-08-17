@@ -743,6 +743,33 @@ hypothesis = project.create_node(
 )
 ```
 
+Узлы с обязательными исходящими связями создаются вместе с ними одной атомарной
+операцией:
+
+```python
+from research_framework import Actor, EdgeKind, RelationDraft, RunDraft
+
+run = project.create_node(
+    RunDraft(
+        title="Benchmark run",
+        started_at="2026-08-17T12:00:00+07:00",
+        outcome="running",
+    ),
+    actor=Actor.agent("benchmark-runner", run_id="agent-run-42"),
+    initial_relations=(
+        RelationDraft(
+            kind=EdgeKind.INSTANCE_OF,
+            target=experiment_id,
+        ),
+    ),
+)
+```
+
+`initial_relations` содержит только исходящие связи нового узла. Приложение
+разрешает ID, alias или однозначный префикс target, генерирует ID и audit-поля
+связей и проверяет будущий граф до записи. Операция либо создаёт один полностью
+валидный Markdown-файл, либо не изменяет проект.
+
 ### 10.3. Создание связи
 
 ```python
@@ -832,6 +859,13 @@ rf node create hypothesis \
   --tag retrieval \
   --actor fedor
 
+rf node create run \
+  --title "Benchmark run" \
+  --started-at "2026-08-17T12:00:00+07:00" \
+  --outcome running \
+  --instance-of exp-01K2M7K6 \
+  --actor fedor
+
 rf link add evd-01K2M7M4 supports hyp-01K2M7K6 \
   --rationale "Recall вырос на 13%." \
   --actor fedor
@@ -865,6 +899,30 @@ rf node create hypothesis --from-json hypothesis.json --json
 rf link add --from-json - --json < relation.json
 rf node show hyp-01K2M7K6 --json
 ```
+
+JSON input для `node create` может включать те же начальные связи:
+
+```json
+{
+  "title": "Benchmark run",
+  "started_at": "2026-08-17T12:00:00+07:00",
+  "outcome": "running",
+  "initial_relations": [
+    {
+      "kind": "instance_of",
+      "target": "exp-01K2M7K6"
+    }
+  ],
+  "actor": {
+    "kind": "agent",
+    "id": "benchmark-runner",
+    "run_id": "agent-run-42"
+  }
+}
+```
+
+Для human-oriented режима предусмотрены `--instance-of`, повторяемые
+`--derived-from`, `--assesses` и `--based-on`.
 
 В JSON-режиме:
 

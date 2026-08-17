@@ -16,7 +16,11 @@ from research_framework.domain.enums import (
     NodeKind,
     NodeStatus,
 )
-from research_framework.storage.discovery import discover_node_files, discover_project
+from research_framework.storage.discovery import (
+    DiscoveredProject,
+    discover_node_files,
+    discover_project,
+)
 from research_framework.storage.markdown_codec import MarkdownCodec, MarkdownCodecError
 
 _ULID = r"[0-9A-HJKMNP-TV-Z]{26}"
@@ -880,10 +884,11 @@ def _validate_global(
         )
 
 
-def validate_project(path: Path) -> tuple[Diagnostic, ...]:
-    project = discover_project(path)
+def _load_records(
+    project: DiscoveredProject,
+    diagnostics: list[Diagnostic],
+) -> list[_Record]:
     codec = MarkdownCodec()
-    diagnostics: list[Diagnostic] = []
     records: list[_Record] = []
     for node_path in discover_node_files(project):
         relative_path = node_path.relative_to(project.root)
@@ -906,14 +911,10 @@ def validate_project(path: Path) -> tuple[Diagnostic, ...]:
         record = _Record(path=relative_path, metadata=dict(document.metadata))
         records.append(record)
         _validate_structural(record, diagnostics)
+    return records
 
-    _validate_global(
-        records,
-        diagnostics,
-        root=project.root,
-        require_evidence_provenance=project.config.policies.require_evidence_provenance,
-        forbid_dependency_cycles=project.config.policies.forbid_dependency_cycles,
-    )
+
+def _sorted_diagnostics(diagnostics: list[Diagnostic]) -> tuple[Diagnostic, ...]:
     return tuple(
         sorted(
             diagnostics,
@@ -926,3 +927,44 @@ def validate_project(path: Path) -> tuple[Diagnostic, ...]:
             ),
         )
     )
+
+
+def _validate_records(
+    project: DiscoveredProject,
+    records: list[_Record],
+    diagnostics: list[Diagnostic],
+) -> tuple[Diagnostic, ...]:
+    _validate_global(
+        records,
+        diagnostics,
+        root=project.root,
+        require_evidence_provenance=project.config.policies.require_evidence_provenance,
+        forbid_dependency_cycles=project.config.policies.forbid_dependency_cycles,
+    )
+    return _sorted_diagnostics(diagnostics)
+
+
+def validate_candidate_node(
+    project: DiscoveredProject,
+    *,
+    path: Path,
+    metadata: Mapping[str, Any],
+) -> tuple[Diagnostic, ...]:
+    """Validate an in-memory node as if it already existed in the project."""
+
+    diagnostics: list[Diagnostic] = []
+    records = _load_records(project, diagnostics)
+    record = _Record(
+        path=path.relative_to(project.root),
+        metadata=dict(metadata),
+    )
+    records.append(record)
+    _validate_structural(record, diagnostics)
+    return _validate_records(project, records, diagnostics)
+
+
+def validate_project(path: Path) -> tuple[Diagnostic, ...]:
+    project = discover_project(path)
+    diagnostics: list[Diagnostic] = []
+    records = _load_records(project, diagnostics)
+    return _validate_records(project, records, diagnostics)

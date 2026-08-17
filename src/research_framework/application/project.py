@@ -6,7 +6,7 @@ import re
 import secrets
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import fields
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,7 +14,7 @@ from typing import Any
 
 from research_framework.domain.actors import Actor
 from research_framework.domain.diagnostics import Diagnostic
-from research_framework.domain.edges import relation_is_allowed
+from research_framework.domain.edges import RelationDraft, relation_is_allowed
 from research_framework.domain.enums import (
     DiagnosticSeverity,
     EdgeKind,
@@ -22,6 +22,8 @@ from research_framework.domain.enums import (
     NodeStatus,
 )
 from research_framework.domain.errors import (
+    AmbiguousReference,
+    NodeNotFound,
     RevisionConflict,
     StorageError,
     ValidationFailed,
@@ -226,7 +228,11 @@ class Project:
 
     @staticmethod
     def _invalid(
-        code: str, message: str, *, field: str | None = None
+        code: str,
+        message: str,
+        *,
+        field: str | None = None,
+        details: Mapping[str, Any] | None = None,
     ) -> ValidationFailed:
         return ValidationFailed(
             (
@@ -235,11 +241,18 @@ class Project:
                     code=code,
                     message=message,
                     field=field,
+                    details=dict(details or {}),
                 ),
             )
         )
 
-    def create_node(self, draft: NodeDraft, *, actor: Actor) -> Node:
+    def create_node(
+        self,
+        draft: NodeDraft,
+        *,
+        actor: Actor,
+        initial_relations: Sequence[RelationDraft] = (),
+    ) -> Node:
         kind = draft.kind
         node_id = f"{_PREFIXES[kind]}-{_ulid()}"
         timestamp = _now()
@@ -257,20 +270,82 @@ class Project:
             if value is None or value in ((), frozenset()):
                 continue
             metadata[field.name] = _plain(value)
+        relations: list[dict[str, Any]] = []
+        for index, relation_draft in enumerate(initial_relations):
+            if not isinstance(relation_draft, RelationDraft):
+                raise self._invalid(
+                    "invalid_relation_draft",
+                    "initial relation must be a RelationDraft",
+                    field=f"initial_relations[{index}]",
+                )
+            try:
+                target_node = self._snapshot.get_node(relation_draft.target)
+            except NodeNotFound as error:
+                raise self._invalid(
+                    "relation_target_not_found",
+                    f"relation target does not exist: {relation_draft.target}",
+                    field=f"initial_relations[{index}].target",
+                    details={"target": relation_draft.target},
+                ) from error
+            except AmbiguousReference as error:
+                raise self._invalid(
+                    "ambiguous_relation_target",
+                    f"relation target is ambiguous: {relation_draft.target}",
+                    field=f"initial_relations[{index}].target",
+                    details={
+                        "target": relation_draft.target,
+                        "candidates": list(error.candidates),
+                    },
+                ) from error
+            relation: dict[str, Any] = {
+                "id": f"rel-{_ulid()}",
+                "kind": relation_draft.kind.value,
+                "target": target_node.id,
+                "created_at": timestamp,
+                "created_by": _actor_dict(actor),
+            }
+            if relation_draft.rationale is not None:
+                relation["rationale"] = relation_draft.rationale
+            relations.append(relation)
+
         metadata.update(
             {
                 "created_at": timestamp,
                 "created_by": _actor_dict(actor),
                 "updated_at": timestamp,
                 "updated_by": _actor_dict(actor),
-                "relations": [],
+                "relations": relations,
             }
         )
         folder = self._discovered.vault / _FOLDERS[kind]
         target = folder / f"{node_id}--{_slug(draft.title)}.md"
         body = draft.body or f"\n# {draft.title}\n"
-        self._write_document(target, metadata, body)
-        self._refresh()
+        from research_framework.validation import validate_candidate_node
+
+        diagnostics = validate_candidate_node(
+            self._discovered,
+            path=target,
+            metadata=metadata,
+        )
+        if any(item.severity is DiagnosticSeverity.ERROR for item in diagnostics):
+            raise ValidationFailed(diagnostics)
+        if target.exists():
+            raise StorageError(f"refusing to overwrite existing node: {target}")
+
+        written = False
+        try:
+            self._write_document(target, metadata, body)
+            written = True
+            self._refresh()
+        except Exception:
+            if written:
+                try:
+                    target.unlink(missing_ok=True)
+                except OSError as rollback_error:
+                    raise StorageError(
+                        f"cannot roll back failed node creation: {target}"
+                    ) from rollback_error
+            raise
         return self._snapshot.get_node(node_id)
 
     def _read_current(

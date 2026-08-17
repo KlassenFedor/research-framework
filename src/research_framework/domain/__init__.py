@@ -1,6 +1,6 @@
 from .actors import Actor
 from .diagnostics import Diagnostic
-from .edges import relation_is_allowed
+from .edges import RelationDraft, relation_is_allowed
 from .enums import ActorKind, DiagnosticSeverity, EdgeKind, NodeKind, NodeStatus
 from .errors import *
 from .graph import Edge, GraphSnapshot, Node
@@ -17,5 +17,6 @@ __all__ = [
     "Node",
     "NodeKind",
     "NodeStatus",
+    "RelationDraft",
     "relation_is_allowed",
 ]

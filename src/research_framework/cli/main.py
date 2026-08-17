@@ -22,6 +22,7 @@ from research_framework import (
     Project,
     ProjectNotFound,
     QuestionDraft,
+    RelationDraft,
     ResearchFrameworkError,
     RevisionConflict,
     RunDraft,
@@ -29,7 +30,7 @@ from research_framework import (
     UnsupportedFormatVersion,
     ValidationFailed,
 )
-from research_framework.domain.enums import DiagnosticSeverity
+from research_framework.domain.enums import DiagnosticSeverity, EdgeKind
 from research_framework.validation import validate_project
 
 
@@ -134,6 +135,48 @@ def _draft(kind: str, data: Mapping[str, Any]) -> Any:
         raise CliUsageError(str(error)) from error
 
 
+def _initial_relations(value: Any) -> tuple[RelationDraft, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise CliUsageError("initial_relations must be a list")
+    result: list[RelationDraft] = []
+    allowed = {"kind", "target", "rationale"}
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise CliUsageError(f"initial_relations[{index}] must be an object")
+        unknown = set(item) - allowed
+        if unknown:
+            field = min(unknown)
+            raise CliUsageError(f"unknown initial_relations[{index}] field: {field}")
+        try:
+            result.append(
+                RelationDraft(
+                    kind=EdgeKind(item.get("kind")),
+                    target=item.get("target"),
+                    rationale=item.get("rationale"),
+                )
+            )
+        except (TypeError, ValueError) as error:
+            raise CliUsageError(
+                f"invalid initial_relations[{index}]: {error}"
+            ) from error
+    return tuple(result)
+
+
+def _flag_relations(args: argparse.Namespace) -> tuple[RelationDraft, ...]:
+    relations: list[RelationDraft] = []
+    if args.instance_of is not None:
+        relations.append(RelationDraft(EdgeKind.INSTANCE_OF, args.instance_of))
+    for target in args.derived_from or ():
+        relations.append(RelationDraft(EdgeKind.DERIVED_FROM, target))
+    for target in args.assesses or ():
+        relations.append(RelationDraft(EdgeKind.ASSESSES, target))
+    for target in args.based_on or ():
+        relations.append(RelationDraft(EdgeKind.BASED_ON, target))
+    return tuple(relations)
+
+
 def _node_to_dict(node: Any, *, detail: bool = True) -> dict[str, Any]:
     return node.to_dict(include_body=detail, include_revision=detail)
 
@@ -174,6 +217,10 @@ def _build_parser() -> Parser:
     create.add_argument("--source-kind")
     create.add_argument("--locator")
     create.add_argument("--rationale")
+    create.add_argument("--instance-of")
+    create.add_argument("--derived-from", action="append")
+    create.add_argument("--assesses", action="append")
+    create.add_argument("--based-on", action="append")
     create.add_argument("--tag", action="append", dest="tags")
     create.add_argument("--alias", action="append", dest="aliases")
     create.add_argument("--actor")
@@ -328,11 +375,13 @@ def _handle(args: argparse.Namespace) -> None:
             if args.from_json is not None:
                 request = _read_request(args.from_json)
                 actor = _actor(request.pop("actor", {}))
+                relations = _initial_relations(request.pop("initial_relations", []))
                 values = request
             else:
                 if args.json and args.title is None:
                     raise CliUsageError("node input is required in JSON mode")
                 actor = _human_actor(args.actor)
+                relations = _flag_relations(args)
                 values = {
                     key: value
                     for key, value in vars(args).items()
@@ -364,7 +413,11 @@ def _handle(args: argparse.Namespace) -> None:
                     }
                     and value is not None
                 }
-            created = project.create_node(_draft(args.kind, values), actor=actor)
+            created = project.create_node(
+                _draft(args.kind, values),
+                actor=actor,
+                initial_relations=relations,
+            )
             data = _node_to_dict(created)
             _success(data) if args.json else print(f"Created {created.id}")
         elif args.node_command == "update":

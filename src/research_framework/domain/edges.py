@@ -1,6 +1,27 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from .enums import EdgeKind, NodeKind
+
+
+@dataclass(frozen=True, slots=True)
+class RelationDraft:
+    """Caller-owned fields for an outgoing relation created with a new node."""
+
+    kind: EdgeKind
+    target: str
+    rationale: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "kind", EdgeKind(self.kind))
+        if not isinstance(self.target, str) or not self.target.strip():
+            raise ValueError("relation target must not be blank")
+        if self.rationale is not None and (
+            not isinstance(self.rationale, str) or not self.rationale.strip()
+        ):
+            raise ValueError("relation rationale must not be blank")
+
 
 _ALLOWED: dict[EdgeKind, tuple[set[NodeKind], set[NodeKind]]] = {
     EdgeKind.ADDRESSES: (

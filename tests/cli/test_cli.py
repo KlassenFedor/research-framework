@@ -163,6 +163,168 @@ def test_node_create_accepts_noninteractive_json_from_stdin(
 
 @pytest.mark.contract
 @pytest.mark.cli
+def test_node_create_accepts_initial_relations_from_json(
+    example_project: Path,
+) -> None:
+    request = {
+        "title": "Atomic benchmark run",
+        "started_at": "2026-08-17T12:00:00+07:00",
+        "outcome": "running",
+        "initial_relations": [
+            {
+                "kind": "instance_of",
+                "target": NODE_IDS["experiment"],
+                "rationale": "Uses the benchmark protocol.",
+            }
+        ],
+        "actor": {"kind": "agent", "id": "runner", "run_id": "run-42"},
+    }
+
+    created = run_cli(
+        example_project,
+        "node",
+        "create",
+        "run",
+        "--from-json",
+        "-",
+        "--json",
+        input_text=json.dumps(request),
+    )
+    payload = json_stdout(created)
+    listed = run_cli(
+        example_project,
+        "link",
+        "list",
+        payload["data"]["id"],
+        "--direction",
+        "outgoing",
+        "--json",
+    )
+
+    assert created.returncode == listed.returncode == 0
+    assert json_stdout(listed)["data"] == [
+        {
+            "id": json_stdout(listed)["data"][0]["id"],
+            "kind": "instance_of",
+            "source": payload["data"]["id"],
+            "target": NODE_IDS["experiment"],
+            "created_at": payload["data"]["created_at"],
+            "created_by": {"kind": "agent", "id": "runner", "run_id": "run-42"},
+            "rationale": "Uses the benchmark protocol.",
+        }
+    ]
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_node_create_required_relation_failure_leaves_no_file(
+    example_project: Path,
+) -> None:
+    before = set((example_project / "research" / "runs").glob("*.md"))
+    request = {
+        "title": "Disconnected run",
+        "started_at": "2026-08-17T12:00:00+07:00",
+        "outcome": "running",
+        "actor": {"kind": "human", "id": "creator"},
+    }
+
+    result = run_cli(
+        example_project,
+        "node",
+        "create",
+        "run",
+        "--from-json",
+        "-",
+        "--json",
+        input_text=json.dumps(request),
+    )
+
+    assert result.returncode == 3
+    assert json_stdout(result)["error"]["code"] == "validation_failed"
+    assert set((example_project / "research" / "runs").glob("*.md")) == before
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_node_create_accepts_required_relation_flags(example_project: Path) -> None:
+    result = run_cli(
+        example_project,
+        "node",
+        "create",
+        "run",
+        "--title",
+        "Flag-created run",
+        "--started-at",
+        "2026-08-17T12:00:00+07:00",
+        "--outcome",
+        "running",
+        "--instance-of",
+        NODE_IDS["experiment"],
+        "--actor",
+        "runner",
+        "--json",
+    )
+
+    payload = json_stdout(result)
+    assert result.returncode == 0
+    node = next(
+        path
+        for path in (example_project / "research" / "runs").glob("*.md")
+        if payload["data"]["id"] in path.name
+    )
+    text = node.read_text(encoding="utf-8")
+    assert "kind: instance_of" in text
+    assert f"target: {NODE_IDS['experiment']}" in text
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+@pytest.mark.parametrize(
+    "initial_relations",
+    [
+        {"kind": "instance_of", "target": NODE_IDS["experiment"]},
+        [{"kind": "unknown", "target": NODE_IDS["experiment"]}],
+        [{"kind": "instance_of"}],
+        [
+            {
+                "id": "rel-01J000000000000000000ZZZZZ",
+                "kind": "instance_of",
+                "target": NODE_IDS["experiment"],
+            }
+        ],
+    ],
+)
+def test_node_create_rejects_malformed_initial_relations(
+    example_project: Path,
+    initial_relations: object,
+) -> None:
+    before = set((example_project / "research" / "runs").glob("*.md"))
+    request = {
+        "title": "Malformed relation run",
+        "started_at": "2026-08-17T12:00:00+07:00",
+        "outcome": "running",
+        "initial_relations": initial_relations,
+        "actor": {"kind": "human", "id": "creator"},
+    }
+
+    result = run_cli(
+        example_project,
+        "node",
+        "create",
+        "run",
+        "--from-json",
+        "-",
+        "--json",
+        input_text=json.dumps(request),
+    )
+
+    assert result.returncode == 2
+    assert json_stdout(result)["error"]["code"] == "invalid_arguments"
+    assert set((example_project / "research" / "runs").glob("*.md")) == before
+
+
+@pytest.mark.contract
+@pytest.mark.cli
 def test_node_create_accepts_documented_human_oriented_flags(
     example_project: Path,
 ) -> None:
