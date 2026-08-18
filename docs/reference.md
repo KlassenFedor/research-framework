@@ -249,9 +249,48 @@ Human CLI предоставляет основные специальные п�
 | `rf graph traverse REF --depth N --direction ...` | BFS traversal |
 | `rf graph path SOURCE TARGET` | кратчайший направленный путь |
 | `rf graph export --format json` | детерминированно экспортировать граф |
+| `rf graph render [--output FILE]` | автономная интерактивная HTML-визуализация |
 
 Human output использует карточки, таблицы и стрелки. `--json` переключает
 команду на машинный envelope; `graph export` возвращает raw graph JSON.
+
+### `graph render`
+
+```bash
+rf graph render [--output research-graph.html] [--json]
+rf graph render --focus REF [--depth N] [--output FILE] [--json]
+```
+
+Без `--focus` в HTML попадает полный граф. При `--focus` строится induced
+окрестность во входящем и исходящем направлениях; начальный Node всегда включён.
+Глубина по умолчанию равна `2`, `0` оставляет только focus Node. `--depth` без
+`--focus` и отрицательная глубина являются ошибками аргументов.
+
+Относительный output считается от каталога с `research.yaml`, не от текущей
+директории. Родительские директории создаются автоматически. Output обязан
+иметь расширение `.html` и находиться вне configured vault; существующий HTML
+атомарно заменяется. Документ deterministic для одного GraphSnapshot и набора
+аргументов, не загружает CDN assets и не требует сервера. Пользовательский текст
+встраивается как escaped JSON и выводится через DOM text nodes.
+
+Human-mode сообщает абсолютный путь и число Node/relations. `--json` возвращает:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "output": "/project/reports/graph.html",
+    "nodes": 42,
+    "edges": 57,
+    "focus": null,
+    "depth": null
+  },
+  "warnings": []
+}
+```
+
+HTML является read-only snapshot. Фильтрация, pan/zoom и сохранение раскладки в
+browser `localStorage` не изменяют проект.
 
 ## 9. GraphSnapshot и чтение
 

@@ -9,6 +9,7 @@ JSON-совместимым YAML front matter, связи образуют ти�
 - human-oriented CLI `rf` с таблицами, графами и `$EDITOR`;
 - строгий JSON-интерфейс для агентов, скриптов и CI;
 - публичный Python API и неизменяемые снимки графа;
+- автономную интерактивную HTML-визуализацию без сервера и CDN;
 - structural, referential, semantic и graph validation;
 - атомарные мутации, optimistic revisions и локальные Git diff;
 - JSON Schema Draft 2020-12 для файлового контракта.
@@ -44,11 +45,16 @@ rf node create question \
   --actor fedor
 
 rf validate
+rf graph render
 ```
 
 `rf init` не изменяет непустой каталог. Команды ищут `research.yaml` от текущей
 директории вверх, поэтому при вложенном размещении запускайте их из
 `research-graph/`.
+
+`rf graph render` создаёт `research-graph.html` рядом с `research.yaml`.
+Откройте его обычным браузером: внутри доступны pan/zoom, перетаскивание узлов,
+поиск, фильтры и карточки с metadata, body и связями. Файл полностью автономен.
 
 ## Разработка фреймворка
 

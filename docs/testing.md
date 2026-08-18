@@ -12,6 +12,7 @@
 | Domain | Все типы Node, Actor, enum, неизменяемость, ошибки |
 | Relations | Полная матрица source/kind/target, `supersedes`, `related_to` |
 | Graph | ID/alias/prefix, индексы, filters, neighbors, BFS, shortest path, JSON |
+| HTML graph | Full/local GraphViewModel, induced edges, deterministic safe embedding, standalone controls |
 | Markdown codec | Golden files, body round-trip, порядок полей, restricted YAML 1.2 |
 | JSON Schema | Draft 2020-12, package resources, все Node kinds, config, enums и negative cases |
 | Discovery | Поиск от вложенного пути, границы vault, symlinks, детерминизм |
@@ -20,7 +21,7 @@
 | Mutation performance | Нет повторного vault scan/reload; copy-on-write сохраняет старые snapshots |
 | Formatting | Read-only check, canonical front matter, byte-exact body, idempotence, rollback, concurrent edits |
 | Python API | Init/open, atomic mutations, operation diagnostics, snapshots |
-| CLI | Human/JSON warnings, таблицы/графы, `$EDITOR`, initial relations, stdin и exit codes |
+| CLI | Human/JSON warnings, таблицы/графы, HTML render, `$EDITOR`, initial relations, stdin и exit codes |
 | Git acceptance | Реальные diff для create/update/link/remove/archive/format и локальность файлов |
 | End-to-end | `init → create → link → reopen → traverse → validate → export` |
 
@@ -49,14 +50,8 @@
 
 ## Текущий статус
 
-На 2026-08-18 pytest собирает и успешно выполняет 412 сценариев:
-
-```text
-412 passed
-```
-
-Branch coverage составляет 71,16% при обязательном пороге 70%. CLI contract
-tests запускают отдельный процесс и поэтому не входят в coverage родительского
-процесса. Дополнительно
-проходят strict mypy, Ruff, Ruff format check, `compileall`, сборка пакета и
-smoke-test установленного `rf` entrypoint.
+Актуальное число сценариев и branch coverage фиксируются результатом CI, а не
+дублируются вручную в этом документе. Обязательный branch coverage — 70%. CLI
+contract tests запускают отдельный процесс и поэтому не входят в coverage
+родительского процесса. Дополнительно проходят strict mypy, Ruff, Ruff format
+check, `compileall`, сборка пакета и smoke-test установленного `rf` entrypoint.

@@ -118,12 +118,13 @@ evd-01K2M7M4CNG7M1R0QP91W6N3JD
 - человекочитаемый и JSON-вывод CLI;
 - публичный Python API;
 - экспорт снимка графа в JSON;
+- автономная read-only HTML-визуализация полного или локального графа;
 - тесты файлового формата, доменной модели, CLI и Python API.
 
 ### 3.2. В MVP не входит
 
 - обязательная база данных или поисковый индекс;
-- web-интерфейс;
+- динамический write-capable web-интерфейс и сервер;
 - Obsidian plugin;
 - real-time совместное редактирование;
 - управление Git: commit, pull, push и разрешение конфликтов;
@@ -677,9 +678,8 @@ src/research_framework/
 │   ├── semantic.py
 │   └── graph_rules.py
 ├── presentation/
-│   ├── json_output.py
-│   ├── terminal_output.py
-│   └── dot_output.py
+│   ├── terminal.py
+│   └── html_graph.py
 ├── cli/
 │   ├── main.py
 │   ├── node.py
@@ -726,11 +726,15 @@ class Repository(Protocol):
 Преобразует один и тот же результат в:
 
 - терминальные таблицы и деревья;
-- Markdown;
 - стабильный JSON;
-- DOT для внешней визуализации графа.
+- детерминированный GraphViewModel;
+- автономный интерактивный Canvas HTML для полного графа или локальной
+  окрестности.
 
-Presentation не читает файлы напрямую.
+Presentation не читает исследовательские файлы напрямую: получает immutable
+GraphSnapshot. HTML не зависит от CDN, не исполняет пользовательский Markdown
+как markup и не меняет canonical vault. Payload встраивается как escaped JSON,
+а пользовательские значения выводятся через `textContent`.
 
 ## 10. Python API
 
@@ -919,6 +923,7 @@ rf graph show [ID]
 rf graph traverse ID
 rf graph path SOURCE TARGET
 rf graph export
+rf graph render [--focus REF] [--depth N] [--output FILE]
 
 rf validate
 rf format [--check]

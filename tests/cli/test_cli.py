@@ -1015,6 +1015,99 @@ def test_graph_export_is_deterministic_json(example_project: Path) -> None:
 
 @pytest.mark.contract
 @pytest.mark.cli
+def test_graph_render_writes_standalone_html_at_project_root(
+    example_project: Path,
+) -> None:
+    nested = example_project / "research" / "hypotheses"
+
+    result = run_cli(nested, "graph", "render")
+
+    target = example_project / "research-graph.html"
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert f"Rendered 11 nodes and 14 relations to {target}" in result.stdout
+    assert target.read_text(encoding="utf-8").startswith("<!doctype html>")
+    assert not (nested / "research-graph.html").exists()
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_graph_render_supports_focused_json_mode(example_project: Path) -> None:
+    result = run_cli(
+        example_project,
+        "graph",
+        "render",
+        "--focus",
+        "H-context",
+        "--depth",
+        "1",
+        "--output",
+        "reports/local.html",
+        "--json",
+    )
+
+    payload = json_stdout(result)
+    target = example_project / "reports" / "local.html"
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert payload == {
+        "ok": True,
+        "data": {
+            "output": str(target),
+            "nodes": 6,
+            "edges": 7,
+            "focus": NODE_IDS["hypothesis"],
+            "depth": 1,
+        },
+        "warnings": [],
+    }
+    html = target.read_text(encoding="utf-8")
+    assert NODE_IDS["hypothesis"] in html
+    assert NODE_IDS["source"] not in html
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_graph_render_rejects_depth_without_focus(example_project: Path) -> None:
+    result = run_cli(
+        example_project,
+        "graph",
+        "render",
+        "--depth",
+        "1",
+        "--json",
+    )
+
+    payload = json_stdout(result)
+    assert result.returncode == 2
+    assert payload["error"]["code"] == "invalid_arguments"
+    assert "--depth requires --focus" in payload["error"]["message"]
+    assert not (example_project / "research-graph.html").exists()
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_graph_render_refuses_to_write_inside_canonical_vault(
+    example_project: Path,
+) -> None:
+    result = run_cli(
+        example_project,
+        "graph",
+        "render",
+        "--output",
+        "research/generated.html",
+        "--json",
+    )
+
+    payload = json_stdout(result)
+    assert result.returncode == 2
+    assert payload["error"]["code"] == "invalid_arguments"
+    assert "outside the research vault" in payload["error"]["message"]
+    assert not (example_project / "research" / "generated.html").exists()
+
+
+@pytest.mark.contract
+@pytest.mark.cli
 def test_missing_and_ambiguous_references_use_exit_code_four(
     example_project: Path,
 ) -> None:

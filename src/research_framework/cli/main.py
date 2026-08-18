@@ -39,12 +39,16 @@ from research_framework.domain.enums import DiagnosticSeverity, EdgeKind
 from research_framework.domain.graph import Edge, Node
 from research_framework.domain.nodes import NodeDraft
 from research_framework.presentation import (
+    build_graph_view,
     render_edges,
+    render_graph_html,
     render_neighborhood,
     render_node,
     render_nodes,
     render_path,
+    write_graph_html,
 )
+from research_framework.storage.discovery import discover_project
 from research_framework.validation import validate_project
 
 
@@ -368,6 +372,18 @@ def _node_to_dict(node: Node, *, detail: bool = True) -> dict[str, Any]:
     return node.to_dict(include_body=detail, include_revision=detail)
 
 
+def _graph_render_target(project_root: Path, vault: Path, output: str) -> Path:
+    requested = Path(output)
+    target = (
+        requested if requested.is_absolute() else project_root / requested
+    ).resolve()
+    if target.suffix.lower() != ".html":
+        raise CliUsageError("--output must name an .html file")
+    if target.is_relative_to(vault.resolve()):
+        raise CliUsageError("--output must be outside the research vault")
+    return target
+
+
 def _build_parser() -> Parser:
     parser = Parser(prog="rf", description="Text-first research graph")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -482,6 +498,12 @@ def _build_parser() -> Parser:
 
     export = graph_commands.add_parser("export")
     export.add_argument("--format", choices=("json",), default="json")
+
+    render = graph_commands.add_parser("render")
+    render.add_argument("--output", default="research-graph.html")
+    render.add_argument("--focus")
+    render.add_argument("--depth", type=int)
+    render.add_argument("--json", action="store_true")
 
     validate = commands.add_parser("validate")
     validate.add_argument("--json", action="store_true")
@@ -802,6 +824,36 @@ def _handle(args: argparse.Namespace) -> int:
             )
         elif args.graph_command == "export":
             sys.stdout.write(graph.export_json())
+        elif args.graph_command == "render":
+            if args.depth is not None and args.focus is None:
+                raise CliUsageError("--depth requires --focus")
+            discovered = discover_project(project.root)
+            view = build_graph_view(
+                graph,
+                title=discovered.config.title,
+                focus=args.focus,
+                depth=args.depth,
+            )
+            output_path = _graph_render_target(
+                project.root,
+                discovered.vault,
+                args.output,
+            )
+            write_graph_html(output_path, render_graph_html(view))
+            data = {
+                "output": str(output_path),
+                "nodes": len(view.nodes),
+                "edges": len(view.edges),
+                "focus": view.focus,
+                "depth": view.depth,
+            }
+            if args.json:
+                _success(data)
+            else:
+                print(
+                    f"Rendered {len(view.nodes)} nodes and {len(view.edges)} "
+                    f"relations to {output_path}"
+                )
         return 0
 
     raise CliUsageError(f"unsupported command: {args.command}")

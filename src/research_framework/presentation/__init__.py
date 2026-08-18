@@ -1,3 +1,11 @@
+from .html_graph import (
+    GraphView,
+    GraphViewEdge,
+    GraphViewNode,
+    build_graph_view,
+    render_graph_html,
+    write_graph_html,
+)
 from .terminal import (
     render_edges,
     render_neighborhood,
@@ -7,9 +15,15 @@ from .terminal import (
 )
 
 __all__ = [
+    "GraphView",
+    "GraphViewEdge",
+    "GraphViewNode",
+    "build_graph_view",
     "render_edges",
+    "render_graph_html",
     "render_neighborhood",
     "render_node",
     "render_nodes",
     "render_path",
+    "write_graph_html",
 ]

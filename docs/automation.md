@@ -274,6 +274,7 @@ rf graph show REF --json
 rf graph traverse REF --direction both --depth 2 --json
 rf graph path SOURCE TARGET --json
 rf graph export --format json
+rf graph render --output reports/graph.html --json
 ```
 
 - `show`: center и все смежные edges;
@@ -281,9 +282,18 @@ rf graph export --format json
 - `path`: кратчайший направленный путь как array edges; пустой array означает
   «путь не найден» или source равен target;
 - `export`: детерминированный полный снимок `{ "nodes": [...], "edges": [...] }`.
+- `render`: записывает standalone HTML и возвращает output path, число nodes и
+  edges, resolved focus ID и depth в обычном success envelope.
 
 `graph export` — исключение: это raw JSON без `ok/data/warnings`, потому что
 его результат и есть переносимый граф.
+
+Для ограниченного артефакта используйте
+`--focus REF --depth N`. При `--focus` без `--depth` применяется глубина `2`;
+`--depth` без focus отклоняется. Относительный `--output` разрешается от project
+root, обязан заканчиваться на `.html` и не может находиться внутри vault.
+Команда только читает GraphSnapshot и атомарно записывает производный файл;
+исследовательские Markdown-документы не меняются.
 
 ## 10. Validation и formatting в CI
 
