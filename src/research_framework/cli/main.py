@@ -24,6 +24,7 @@ from research_framework import (
     ExperimentDraft,
     HypothesisDraft,
     NodeNotFound,
+    ProgressCallback,
     Project,
     ProjectNotFound,
     QuestionDraft,
@@ -48,6 +49,8 @@ from research_framework.presentation import (
     render_path,
     write_graph_html,
 )
+from research_framework.presentation.progress import terminal_progress
+from research_framework.progress import notify_progress
 from research_framework.storage.discovery import discover_project
 from research_framework.validation import validate_project
 
@@ -386,6 +389,22 @@ def _graph_render_target(project_root: Path, vault: Path, output: str) -> Path:
 
 def _build_parser() -> Parser:
     parser = Parser(prog="rf", description="Text-first research graph")
+    progress = parser.add_mutually_exclusive_group()
+    progress.add_argument(
+        "--progress",
+        dest="progress_mode",
+        action="store_const",
+        const="always",
+        default="auto",
+        help="show progress on stderr even when it is not a TTY",
+    )
+    progress.add_argument(
+        "--no-progress",
+        dest="progress_mode",
+        action="store_const",
+        const="never",
+        help="disable progress output",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     init = commands.add_parser("init")
@@ -515,7 +534,11 @@ def _build_parser() -> Parser:
     return parser
 
 
-def _handle(args: argparse.Namespace) -> int:
+def _handle(
+    args: argparse.Namespace,
+    *,
+    progress: ProgressCallback | None = None,
+) -> int:
     cwd = Path.cwd()
     data: Any
     if args.command == "init":
@@ -529,7 +552,7 @@ def _handle(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "validate":
-        diagnostics = validate_project(cwd)
+        diagnostics = validate_project(cwd, progress=progress)
         errors = [
             item for item in diagnostics if item.severity is DiagnosticSeverity.ERROR
         ]
@@ -561,8 +584,8 @@ def _handle(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "format":
-        project = Project.open(cwd)
-        result = project.format(check=args.check)
+        project = Project.open(cwd, progress=progress)
+        result = project.format(check=args.check, progress=progress)
         changed = [str(path.relative_to(project.root)) for path in result.changed_paths]
         if args.check and changed:
             message = f"{len(changed)} file(s) require formatting"
@@ -590,7 +613,7 @@ def _handle(args: argparse.Namespace) -> int:
         )
         return 0
 
-    project = Project.open(cwd)
+    project = Project.open(cwd, progress=progress)
     graph = project.snapshot()
 
     if args.command == "node":
@@ -823,11 +846,33 @@ def _handle(args: argparse.Namespace) -> int:
                 render_path(graph, args.source, graph_path)
             )
         elif args.graph_command == "export":
-            sys.stdout.write(graph.export_json())
+            notify_progress(
+                progress,
+                phase="exporting",
+                current=0,
+                total=1,
+                message="Serializing graph",
+            )
+            document = graph.export_json()
+            notify_progress(
+                progress,
+                phase="exporting",
+                current=1,
+                total=1,
+                message="Serializing graph",
+            )
+            sys.stdout.write(document)
         elif args.graph_command == "render":
             if args.depth is not None and args.focus is None:
                 raise CliUsageError("--depth requires --focus")
             discovered = discover_project(project.root)
+            notify_progress(
+                progress,
+                phase="rendering",
+                current=0,
+                total=3,
+                message="Preparing HTML graph",
+            )
             view = build_graph_view(
                 graph,
                 title=discovered.config.title,
@@ -839,7 +884,29 @@ def _handle(args: argparse.Namespace) -> int:
                 discovered.vault,
                 args.output,
             )
-            write_graph_html(output_path, render_graph_html(view))
+            notify_progress(
+                progress,
+                phase="rendering",
+                current=1,
+                total=3,
+                message="Preparing HTML graph",
+            )
+            document = render_graph_html(view)
+            notify_progress(
+                progress,
+                phase="rendering",
+                current=2,
+                total=3,
+                message="Preparing HTML graph",
+            )
+            write_graph_html(output_path, document)
+            notify_progress(
+                progress,
+                phase="rendering",
+                current=3,
+                total=3,
+                message="Preparing HTML graph",
+            )
             data = {
                 "output": str(output_path),
                 "nodes": len(view.nodes),
@@ -864,7 +931,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     json_mode = "--json" in arguments
     try:
         args = _build_parser().parse_args(arguments)
-        return _handle(args)
+        machine_output = json_mode or (
+            args.command == "graph" and args.graph_command == "export"
+        )
+        with terminal_progress(
+            args.progress_mode,
+            machine_output=machine_output,
+        ) as progress:
+            return _handle(args, progress=progress)
     except CliUsageError as error:
         if json_mode:
             _error("invalid_arguments", str(error))

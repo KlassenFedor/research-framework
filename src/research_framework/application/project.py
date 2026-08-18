@@ -30,12 +30,13 @@ from research_framework.domain.errors import (
 )
 from research_framework.domain.graph import Edge, GraphSnapshot, Node
 from research_framework.domain.nodes import NodeDraft
+from research_framework.progress import ProgressCallback, notify_progress
 from research_framework.storage.discovery import (
     DiscoveredProject,
     discover_node_files,
     discover_project,
 )
-from research_framework.storage.loader import load_snapshot, parse_edges, parse_node
+from research_framework.storage.loader import parse_edges, parse_node
 from research_framework.storage.markdown_codec import DecodedMarkdown, MarkdownCodec
 from research_framework.storage.yaml_codec import dump_restricted_yaml
 
@@ -146,14 +147,23 @@ class Project:
         self._last_diagnostics: tuple[Diagnostic, ...] = ()
 
     @classmethod
-    def open(cls, path: Path) -> Project:
+    def open(
+        cls,
+        path: Path,
+        *,
+        progress: ProgressCallback | None = None,
+    ) -> Project:
         discovered = discover_project(path)
-        from research_framework.validation import validate_project
+        from research_framework.validation import validate_and_load_snapshot
 
-        diagnostics = validate_project(discovered.root)
+        diagnostics, snapshot = validate_and_load_snapshot(
+            discovered,
+            progress=progress,
+        )
         if any(item.severity is DiagnosticSeverity.ERROR for item in diagnostics):
             raise ValidationFailed(diagnostics)
-        return cls(discovered, load_snapshot(discovered))
+        assert snapshot is not None
+        return cls(discovered, snapshot)
 
     @classmethod
     def init(
@@ -204,12 +214,21 @@ class Project:
     def root(self) -> Path:
         return self._discovered.root
 
-    def validate(self) -> tuple[Diagnostic, ...]:
+    def validate(
+        self,
+        *,
+        progress: ProgressCallback | None = None,
+    ) -> tuple[Diagnostic, ...]:
         from research_framework.validation import validate_project
 
-        return validate_project(self.root)
+        return validate_project(self.root, progress=progress)
 
-    def format(self, *, check: bool = False) -> FormatResult:
+    def format(
+        self,
+        *,
+        check: bool = False,
+        progress: ProgressCallback | None = None,
+    ) -> FormatResult:
         """Check or apply canonical YAML front matter across the vault.
 
         Markdown bodies are copied byte-for-byte. Applying changes is treated as
@@ -218,13 +237,20 @@ class Project:
         """
 
         self._last_diagnostics = ()
-        diagnostics = self.validate()
+        diagnostics = self.validate(progress=progress)
         if any(item.severity is DiagnosticSeverity.ERROR for item in diagnostics):
             raise ValidationFailed(diagnostics)
 
         paths = discover_node_files(self._discovered)
         candidates: list[_FormatCandidate] = []
-        for path in paths:
+        notify_progress(
+            progress,
+            phase="formatting",
+            current=0,
+            total=len(paths),
+            message="Checking canonical formatting",
+        )
+        for processed, path in enumerate(paths, start=1):
             self._safe_target(path)
             try:
                 original = path.read_bytes()
@@ -241,6 +267,13 @@ class Project:
             # Prepare and parse every output before touching any destination.
             self._codec.decode(formatted.decode("utf-8"), path=path)
             if formatted == original:
+                notify_progress(
+                    progress,
+                    phase="formatting",
+                    current=processed,
+                    total=len(paths),
+                    message="Checking canonical formatting",
+                )
                 continue
             candidates.append(
                 _FormatCandidate(
@@ -250,6 +283,13 @@ class Project:
                     formatted=formatted,
                     revision=hashlib.sha256(original).hexdigest(),
                 )
+            )
+            notify_progress(
+                progress,
+                phase="formatting",
+                current=processed,
+                total=len(paths),
+                message="Checking canonical formatting",
             )
 
         result = FormatResult(
@@ -279,7 +319,10 @@ class Project:
                     )
                 self._atomic_write_bytes(candidate.path, candidate.formatted)
                 written.append(candidate)
-            self._refresh()
+            if progress is None:
+                self._refresh()
+            else:
+                self._refresh(progress=progress)
         except Exception:
             rollback_errors: list[Exception] = []
             for candidate in reversed(written):
@@ -307,11 +350,17 @@ class Project:
         self._last_diagnostics = diagnostics
         return result
 
-    def _refresh(self) -> None:
-        diagnostics = self.validate()
+    def _refresh(self, *, progress: ProgressCallback | None = None) -> None:
+        from research_framework.validation import validate_and_load_snapshot
+
+        diagnostics, snapshot = validate_and_load_snapshot(
+            self._discovered,
+            progress=progress,
+        )
         if any(item.severity is DiagnosticSeverity.ERROR for item in diagnostics):
             raise ValidationFailed(diagnostics)
-        self._snapshot = load_snapshot(self._discovered)
+        assert snapshot is not None
+        self._snapshot = snapshot
         self._snapshot_shared = False
 
     def _safe_target(self, target: Path) -> None:

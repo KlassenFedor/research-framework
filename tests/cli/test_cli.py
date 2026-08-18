@@ -72,6 +72,55 @@ def test_validate_clean_project_in_human_mode(example_project: Path) -> None:
 
 @pytest.mark.contract
 @pytest.mark.cli
+def test_progress_can_be_forced_for_human_commands(example_project: Path) -> None:
+    result = run_cli(example_project, "--progress", "validate")
+
+    assert result.returncode == 0
+    assert "Loading research nodes" in result.stderr
+    assert "100.0%" in result.stderr
+    assert "Validating graph" in result.stderr
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_progress_never_pollutes_json_mode(example_project: Path) -> None:
+    result = run_cli(example_project, "--progress", "validate", "--json")
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert json_stdout(result)["ok"] is True
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_progress_never_pollutes_raw_graph_export(example_project: Path) -> None:
+    result = run_cli(example_project, "--progress", "graph", "export")
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert len(json.loads(result.stdout)["nodes"]) == 11
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_graph_render_progress_includes_render_phase(example_project: Path) -> None:
+    result = run_cli(
+        example_project,
+        "--progress",
+        "graph",
+        "render",
+        "--output",
+        "reports/progress.html",
+    )
+
+    assert result.returncode == 0
+    assert "Building graph indexes" in result.stderr
+    assert "Preparing HTML graph" in result.stderr
+    assert (example_project / "reports" / "progress.html").is_file()
+
+
+@pytest.mark.contract
+@pytest.mark.cli
 def test_validate_json_mode_emits_exactly_one_json_document(
     example_project: Path,
 ) -> None:

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -17,12 +18,18 @@ from research_framework.domain.enums import (
     NodeStatus,
 )
 from research_framework.domain.graph import Edge, GraphSnapshot
+from research_framework.progress import ProgressCallback, notify_progress
 from research_framework.storage.discovery import (
     DiscoveredProject,
     discover_node_files,
     discover_project,
 )
-from research_framework.storage.markdown_codec import MarkdownCodec, MarkdownCodecError
+from research_framework.storage.loader import parse_edges, parse_node
+from research_framework.storage.markdown_codec import (
+    DecodedMarkdown,
+    MarkdownCodec,
+    MarkdownCodecError,
+)
 
 _ULID = r"[0-9A-HJKMNP-TV-Z]{26}"
 _NODE_PREFIXES = {
@@ -99,6 +106,8 @@ _REQUIRED_SPECIAL: dict[str, set[str]] = {
 class _Record:
     path: Path
     metadata: dict[str, Any]
+    document: DecodedMarkdown | None = None
+    revision: str | None = None
 
     @property
     def node_id(self) -> str | None:
@@ -857,26 +866,42 @@ def _validate_relations(record: _Record, diagnostics: list[Diagnostic]) -> None:
 
 def _cycles(adjacency: Mapping[str, set[str]]) -> list[list[str]]:
     state: dict[str, int] = {}
-    stack: list[str] = []
+    active: list[str] = []
+    active_positions: dict[str, int] = {}
     found: list[list[str]] = []
+    seen: set[frozenset[str]] = set()
 
-    def visit(node: str) -> None:
-        state[node] = 1
-        stack.append(node)
-        for target in sorted(adjacency.get(node, set())):
-            if state.get(target, 0) == 0:
-                visit(target)
-            elif state.get(target) == 1:
-                start = stack.index(target)
-                cycle = stack[start:].copy()
-                if set(cycle) not in [set(existing) for existing in found]:
+    for root in sorted(adjacency):
+        if state.get(root, 0) != 0:
+            continue
+        state[root] = 1
+        active_positions[root] = 0
+        active.append(root)
+        stack: list[tuple[str, Iterator[str]]] = [
+            (root, iter(sorted(adjacency.get(root, set()))))
+        ]
+        while stack:
+            node, targets = stack[-1]
+            try:
+                target = next(targets)
+            except StopIteration:
+                stack.pop()
+                active.pop()
+                active_positions.pop(node)
+                state[node] = 2
+                continue
+            target_state = state.get(target, 0)
+            if target_state == 0:
+                state[target] = 1
+                active_positions[target] = len(active)
+                active.append(target)
+                stack.append((target, iter(sorted(adjacency.get(target, set())))))
+            elif target_state == 1:
+                cycle = active[active_positions[target] :].copy()
+                key = frozenset(cycle)
+                if key not in seen:
+                    seen.add(key)
                     found.append(cycle)
-        stack.pop()
-        state[node] = 2
-
-    for node in sorted(adjacency):
-        if state.get(node, 0) == 0:
-            visit(node)
     return found
 
 
@@ -1106,15 +1131,47 @@ def _load_records(
     diagnostics: list[Diagnostic],
     *,
     exclude_path: Path | None = None,
+    retain_documents: bool = False,
+    progress: ProgressCallback | None = None,
 ) -> list[_Record]:
     codec = MarkdownCodec()
     records: list[_Record] = []
-    for node_path in discover_node_files(project):
+    notify_progress(
+        progress,
+        phase="discovering",
+        current=0,
+        total=None,
+        message="Discovering research nodes",
+    )
+    node_paths = discover_node_files(project)
+    notify_progress(
+        progress,
+        phase="discovering",
+        current=1,
+        total=1,
+        message="Discovering research nodes",
+    )
+    notify_progress(
+        progress,
+        phase="loading",
+        current=0,
+        total=len(node_paths),
+        message="Loading research nodes",
+    )
+    for processed, node_path in enumerate(node_paths, start=1):
         relative_path = node_path.relative_to(project.root)
         if relative_path == exclude_path:
+            notify_progress(
+                progress,
+                phase="loading",
+                current=processed,
+                total=len(node_paths),
+                message="Loading research nodes",
+            )
             continue
         try:
-            text = node_path.read_text(encoding="utf-8")
+            raw = node_path.read_bytes()
+            text = raw.decode("utf-8")
         except (OSError, UnicodeError) as error:
             diagnostics.append(
                 _diagnostic(
@@ -1123,15 +1180,41 @@ def _load_records(
                     path=relative_path,
                 )
             )
+            notify_progress(
+                progress,
+                phase="loading",
+                current=processed,
+                total=len(node_paths),
+                message="Loading research nodes",
+            )
             continue
         try:
             document = codec.decode(text, path=node_path)
         except MarkdownCodecError as error:
             diagnostics.append(_diagnostic(error.code, str(error), path=relative_path))
+            notify_progress(
+                progress,
+                phase="loading",
+                current=processed,
+                total=len(node_paths),
+                message="Loading research nodes",
+            )
             continue
-        record = _Record(path=relative_path, metadata=dict(document.metadata))
+        record = _Record(
+            path=relative_path,
+            metadata=dict(document.metadata),
+            document=document if retain_documents else None,
+            revision=hashlib.sha256(raw).hexdigest() if retain_documents else None,
+        )
         records.append(record)
         _validate_structural(record, diagnostics)
+        notify_progress(
+            progress,
+            phase="loading",
+            current=processed,
+            total=len(node_paths),
+            message="Loading research nodes",
+        )
     return records
 
 
@@ -1531,8 +1614,86 @@ def validate_candidate_node(
     return _validate_records(project, records, diagnostics)
 
 
-def validate_project(path: Path) -> tuple[Diagnostic, ...]:
+def validate_project(
+    path: Path,
+    *,
+    progress: ProgressCallback | None = None,
+) -> tuple[Diagnostic, ...]:
     project = discover_project(path)
     diagnostics: list[Diagnostic] = []
-    records = _load_records(project, diagnostics)
-    return _validate_records(project, records, diagnostics)
+    records = _load_records(project, diagnostics, progress=progress)
+    notify_progress(
+        progress,
+        phase="validating",
+        current=0,
+        total=1,
+        message="Validating graph",
+    )
+    result = _validate_records(project, records, diagnostics)
+    notify_progress(
+        progress,
+        phase="validating",
+        current=1,
+        total=1,
+        message="Validating graph",
+    )
+    return result
+
+
+def validate_and_load_snapshot(
+    project: DiscoveredProject,
+    *,
+    progress: ProgressCallback | None = None,
+) -> tuple[tuple[Diagnostic, ...], GraphSnapshot | None]:
+    """Validate and build a snapshot from one read/decode pass."""
+
+    diagnostics: list[Diagnostic] = []
+    records = _load_records(
+        project,
+        diagnostics,
+        retain_documents=True,
+        progress=progress,
+    )
+    notify_progress(
+        progress,
+        phase="validating",
+        current=0,
+        total=1,
+        message="Validating graph",
+    )
+    result = _validate_records(project, records, diagnostics)
+    notify_progress(
+        progress,
+        phase="validating",
+        current=1,
+        total=1,
+        message="Validating graph",
+    )
+    if any(item.severity is DiagnosticSeverity.ERROR for item in result):
+        return result, None
+
+    nodes = []
+    edges: list[Edge] = []
+    notify_progress(
+        progress,
+        phase="indexing",
+        current=0,
+        total=len(records),
+        message="Building graph indexes",
+    )
+    for processed, record in enumerate(records, start=1):
+        assert record.document is not None
+        assert record.revision is not None
+        node = parse_node(record.document, revision=record.revision)
+        nodes.append(node)
+        edges.extend(parse_edges(node, record.metadata))
+        record.document = None
+        record.metadata.clear()
+        notify_progress(
+            progress,
+            phase="indexing",
+            current=processed,
+            total=len(records),
+            message="Building graph indexes",
+        )
+    return result, GraphSnapshot(nodes, edges)

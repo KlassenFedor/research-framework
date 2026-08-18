@@ -7,6 +7,7 @@ import pytest
 
 from research_framework import DiagnosticSeverity
 from research_framework.validation import validate_project
+from research_framework.validation.validator import _cycles
 from tests.conftest import NODE_IDS, RELATION_IDS
 
 
@@ -62,6 +63,19 @@ def _codes(root: Path) -> set[str]:
 @pytest.mark.contract
 def test_example_project_has_no_diagnostics(example_project: Path) -> None:
     assert validate_project(example_project) == ()
+
+
+def test_cycle_detection_handles_graphs_deeper_than_python_recursion_limit() -> None:
+    depth = 5_000
+    adjacency = {f"node-{index}": {f"node-{index + 1}"} for index in range(depth)}
+
+    assert _cycles(adjacency) == []
+
+    adjacency[f"node-{depth}"] = {"node-0"}
+    cycles = _cycles(adjacency)
+
+    assert len(cycles) == 1
+    assert len(cycles[0]) == depth + 1
 
 
 @pytest.mark.contract

@@ -340,27 +340,28 @@ class GraphSnapshot:
         node = self.get_node(node_id)
         if direction not in {"outgoing", "incoming", "both"}:
             raise ValueError("direction must be outgoing, incoming, or both")
-        neighbor_ids: set[str] = set()
-        if direction in {"outgoing", "both"}:
-            neighbor_ids.update(
-                edge.target for edge in self.outgoing(node.id, kinds=kinds)
-            )
-        if direction in {"incoming", "both"}:
-            neighbor_ids.update(
-                edge.source for edge in self.incoming(node.id, kinds=kinds)
-            )
-
         accepted = self._kind_values(kinds)
+        return self._neighbors(node.id, direction=direction, accepted=accepted)
+
+    def _neighbors(
+        self,
+        node_id: str,
+        *,
+        direction: str,
+        accepted: set[EdgeKind] | None,
+    ) -> tuple[Node, ...]:
+        neighbor_ids: set[str] = set()
         symmetric = {EdgeKind.CONTRADICTS, EdgeKind.RELATED_TO}
-        for edge in (
-            *self._outgoing.get(node.id, ()),
-            *self._incoming.get(node.id, ()),
-        ):
-            if edge.kind not in symmetric or (
-                accepted is not None and edge.kind not in accepted
-            ):
+        for edge in self._outgoing.get(node_id, ()):
+            if accepted is not None and edge.kind not in accepted:
                 continue
-            neighbor_ids.add(edge.target if edge.source == node.id else edge.source)
+            if direction in {"outgoing", "both"} or edge.kind in symmetric:
+                neighbor_ids.add(edge.target)
+        for edge in self._incoming.get(node_id, ()):
+            if accepted is not None and edge.kind not in accepted:
+                continue
+            if direction in {"incoming", "both"} or edge.kind in symmetric:
+                neighbor_ids.add(edge.source)
 
         return tuple(
             sorted(
@@ -380,6 +381,9 @@ class GraphSnapshot:
         start = self.get_node(node_id)
         if depth < 0:
             raise ValueError("depth must not be negative")
+        if direction not in {"outgoing", "incoming", "both"}:
+            raise ValueError("direction must be outgoing, incoming, or both")
+        accepted = self._kind_values(kinds)
         visited = {start.id}
         result: list[Node] = []
         queue: deque[tuple[str, int]] = deque([(start.id, 0)])
@@ -387,7 +391,11 @@ class GraphSnapshot:
             current, current_depth = queue.popleft()
             if current_depth >= depth:
                 continue
-            for neighbor in self.neighbors(current, direction=direction, kinds=kinds):
+            for neighbor in self._neighbors(
+                current,
+                direction=direction,
+                accepted=accepted,
+            ):
                 if neighbor.id in visited:
                     continue
                 visited.add(neighbor.id)
@@ -407,20 +415,31 @@ class GraphSnapshot:
         target = self.get_node(target_id)
         if source.id == target.id:
             return ()
-        queue: deque[tuple[str, tuple[Edge, ...]]] = deque([(source.id, ())])
+        accepted = self._kind_values(kinds)
+        queue: deque[tuple[str, int]] = deque([(source.id, 0)])
         visited = {source.id}
+        predecessor: dict[str, Edge] = {}
         while queue:
-            current, path = queue.popleft()
-            if max_depth is not None and len(path) >= max_depth:
+            current, depth = queue.popleft()
+            if max_depth is not None and depth >= max_depth:
                 continue
-            for edge in self.outgoing(current, kinds=kinds):
-                next_path = (*path, edge)
-                if edge.target == target.id:
-                    return next_path
+            for edge in self._outgoing.get(current, ()):
+                if accepted is not None and edge.kind not in accepted:
+                    continue
                 if edge.target in visited or edge.target not in self._nodes:
                     continue
                 visited.add(edge.target)
-                queue.append((edge.target, next_path))
+                predecessor[edge.target] = edge
+                if edge.target == target.id:
+                    path: list[Edge] = []
+                    cursor = target.id
+                    while cursor != source.id:
+                        previous = predecessor[cursor]
+                        path.append(previous)
+                        cursor = previous.source
+                    path.reverse()
+                    return tuple(path)
+                queue.append((edge.target, depth + 1))
         return None
 
     def export_json(self) -> str:

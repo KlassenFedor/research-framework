@@ -254,6 +254,21 @@ Human CLI предоставляет основные специальные п�
 Human output использует карточки, таблицы и стрелки. `--json` переключает
 команду на машинный envelope; `graph export` возвращает raw graph JSON.
 
+### Progress долгих операций
+
+При работе в TTY CLI автоматически показывает в `stderr` этапы discovery,
+чтения Markdown, validation, построения индексов, форматирования и HTML render:
+
+```bash
+rf graph render
+rf --progress graph render       # принудительно, например в текстовом логе
+rf --no-progress graph render    # полностью отключить
+```
+
+`--progress` и `--no-progress` являются корневыми опциями и ставятся перед
+командой. Progress никогда не выводится для `--json` и raw `graph export`,
+поэтому машинный stdout/stderr-контракт остаётся стабильным.
+
 ### `graph render`
 
 ```bash
@@ -291,6 +306,10 @@ Human-mode сообщает абсолютный путь и число Node/rel
 
 HTML является read-only snapshot. Фильтрация, pan/zoom и сохранение раскладки в
 browser `localStorage` не изменяют проект.
+
+Индикатор `Layout` показывает ограниченную адаптивную раскладку; `Layout ready`
+означает, что цепочка animation frames завершилась. Pan/drag перерисовываются
+только по pointer events и не поддерживают бесконечный animation loop.
 
 Tag picker строится из тегов попавших в текущий full/local GraphView. Пустой
 выбор не ограничивает Node. Для нескольких выбранных тегов `any` оставляет Node,
@@ -429,9 +448,14 @@ Conflict markers не разрешаются автоматически. Сна�
 ```python
 from pathlib import Path
 
-from research_framework import Actor, Project, QuestionDraft
+from research_framework import Actor, ProgressEvent, Project, QuestionDraft
 
-project = Project.open(Path("research-graph"))
+def report(event: ProgressEvent) -> None:
+    total = "?" if event.total is None else event.total
+    print(event.phase, event.current, total, event.message)
+
+
+project = Project.open(Path("research-graph"), progress=report)
 question = project.create_node(
     QuestionDraft(
         title="Does the change help?",
@@ -451,6 +475,11 @@ question = project.create_node(
 - `archive_node(...)`;
 - `add_edge()` и `remove_edge()`;
 - `format(check=True/False)`.
+
+`Project.open()`, `Project.validate()` и `Project.format()` принимают
+необязательный `progress` callback. Он получает immutable `ProgressEvent` с
+полями `phase`, `current`, `total`, `message` и свойством `completed`. Это
+предназначенный для агентов и GUI машинный эквивалент CLI progress bar.
 
 Публичные draft-классы соответствуют десяти Node kinds. `RelationDraft`
 создаёт исходящую initial relation. Actors создаются через `Actor.human()` и

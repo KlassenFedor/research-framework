@@ -238,6 +238,8 @@ def test_html_contains_interactive_graph_controls(example_project) -> None:
         "relation-filter",
         "fit",
         "reset-layout",
+        "layout-progress",
+        "layout-status",
         "details",
         "graph-data",
     ):
@@ -246,8 +248,8 @@ def test_html_contains_interactive_graph_controls(example_project) -> None:
     assert "requestAnimationFrame" in html
     assert "devicePixelRatio" in html
     assert "selectedTags" in html
-    assert ".some(tag => node.tags.includes(tag))" in html
-    assert ".every(tag => node.tags.includes(tag))" in html
+    assert ".some(tag => node.tagSet.has(tag))" in html
+    assert ".every(tag => node.tagSet.has(tag))" in html
     assert "tags: all" in html
     assert 'value="independent"' in html
     assert 'value="linked"' in html
@@ -256,6 +258,24 @@ def test_html_contains_interactive_graph_controls(example_project) -> None:
     assert 'edge.kind === "related_to"' in html
     assert "owners.some(ownerId => visibleAnchorIds.has(ownerId))" in html
     assert "showUnlinked.checked && matches" in html
+    assert "node.searchText.includes(query)" in html
+    assert "adjacentById.get(node.id)" in html
+    assert "maximumLayoutIterations" in html
+
+
+@pytest.mark.contract
+def test_html_animation_stops_without_pointer_cleanup_dependency(
+    example_project,
+) -> None:
+    graph = Project.open(example_project).snapshot()
+    html = render_graph_html(build_graph_view(graph, title="Example graph"))
+
+    assert "alpha > .006 || dragged" not in html
+    assert "if (running && !panning) schedule();" in html
+    assert 'canvas.addEventListener("lostpointercapture"' in html
+    assert 'window.addEventListener("blur"' in html
+    assert 'document.addEventListener("visibilitychange"' in html
+    assert "Math.min(...xs)" not in html
 
 
 @pytest.mark.contract

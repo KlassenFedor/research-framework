@@ -5,7 +5,6 @@ from typing import Never
 
 import pytest
 
-import research_framework.application.project as project_module
 import research_framework.validation.validator as validator_module
 from research_framework import Actor, ClaimDraft, EdgeKind, Project
 from tests.conftest import NODE_IDS
@@ -26,8 +25,6 @@ def test_mutations_do_not_rescan_or_reload_unchanged_vault(
 
     with monkeypatch.context() as patch:
         patch.setattr(validator_module, "_load_records", reject_full_scan)
-        patch.setattr(project_module, "load_snapshot", reject_full_scan)
-
         created = project.create_node(
             ClaimDraft(
                 title="Incremental mutation",

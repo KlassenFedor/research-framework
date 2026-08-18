@@ -32,6 +32,7 @@ from .domain.nodes import (
     RunDraft,
     SourceDraft,
 )
+from .progress import ProgressCallback, ProgressEvent
 from .schemas import node_schema, project_schema
 
 __all__ = [
@@ -53,6 +54,8 @@ __all__ = [
     "NodeKind",
     "NodeNotFound",
     "NodeStatus",
+    "ProgressCallback",
+    "ProgressEvent",
     "Project",
     "ProjectNotFound",
     "QuestionDraft",

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from research_framework.storage.markdown_codec import MarkdownCodec, MarkdownCodecError
 from tests.conftest import EXAMPLE_PROJECT, markdown_document, node_metadata
@@ -195,6 +196,24 @@ def test_restricted_yaml_rejects_ambiguous_or_unsafe_features(
 
     assert raised.value.code == code
     assert raised.value.path == Path("unsafe.md")
+
+
+@pytest.mark.contract
+def test_restricted_yaml_is_parsed_without_a_separate_token_scan(
+    codec: MarkdownCodec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def reject_scan(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AssertionError("YAML was scanned separately before parsing")
+
+    monkeypatch.setattr(yaml, "scan", reject_scan)
+
+    decoded = codec.decode(
+        "---\ntitle: Single pass\nenabled: true\n---\nBody\n",
+        path=Path("single-pass.md"),
+    )
+
+    assert decoded.metadata == {"title": "Single pass", "enabled": True}
 
 
 @pytest.mark.contract

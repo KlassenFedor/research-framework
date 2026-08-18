@@ -76,6 +76,18 @@ class GraphView:
 
 
 def _view_node(node: Node) -> GraphViewNode:
+    details = node.to_dict()
+    for key in (
+        "format_version",
+        "id",
+        "kind",
+        "title",
+        "status",
+        "summary",
+        "tags",
+        "aliases",
+    ):
+        details.pop(key, None)
     return GraphViewNode(
         id=node.id,
         kind=node.kind.value,
@@ -85,7 +97,7 @@ def _view_node(node: Node) -> GraphViewNode:
         tags=node.tags,
         aliases=node.aliases,
         body=node.body,
-        details=node.to_dict(),
+        details=details,
     )
 
 
@@ -255,12 +267,14 @@ button:hover, button:focus-visible { border-color: var(--accent); outline: none;
 header {
   display: flex;
   align-items: baseline;
+  flex-wrap: wrap;
   gap: 14px;
   padding: 14px 18px 8px;
   background: rgba(11, 16, 32, .86);
 }
 h1 { margin: 0; max-width: 60vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 18px; }
-.subtitle, #counts { color: var(--muted); }
+.subtitle, #counts, #layout-status { color: var(--muted); }
+#layout-progress { width: 110px; height: 7px; accent-color: var(--accent); }
 .toolbar {
   display: flex;
   align-items: center;
@@ -410,17 +424,29 @@ _SCRIPT = r"""
   const statusFilter = document.getElementById("status-filter");
   const counts = document.getElementById("counts");
   const showLabels = document.getElementById("show-labels");
+  const layoutProgress = document.getElementById("layout-progress");
+  const layoutStatus = document.getElementById("layout-status");
   const colors = {
     question: "#5eb6ff", hypothesis: "#9c83ff", claim: "#cf80ff",
     experiment: "#55d5c1", run: "#45bda9", evidence: "#79d66b",
     assessment: "#f2c75c", source: "#ff9d66", artifact: "#ee7f8c",
     decision: "#f06aa6"
   };
-  const nodes = data.nodes.map((node, index) => ({
-    ...node, x: 0, y: 0, vx: 0, vy: 0, index, visible: true
-  }));
+  const nodes = data.nodes;
+  nodes.forEach((node, index) => {
+    node.x = 0; node.y = 0; node.vx = 0; node.vy = 0;
+    node.index = index; node.visible = true;
+    node.tagSet = new Set(node.tags);
+    node.searchText = [node.id, node.title, node.summary || "", ...node.tags, ...node.aliases]
+      .join(" ").toLocaleLowerCase();
+  });
   const byId = new Map(nodes.map(node => [node.id, node]));
   const edges = data.edges.filter(edge => byId.has(edge.source) && byId.has(edge.target));
+  const adjacentById = new Map(nodes.map(node => [node.id, []]));
+  edges.forEach(edge => {
+    adjacentById.get(edge.source).push(edge);
+    if (edge.target !== edge.source) adjacentById.get(edge.target).push(edge);
+  });
   const availableKinds = [...new Set(nodes.map(node => node.kind))].sort();
   const selectedKinds = new Set(availableKinds);
   const selectedTags = new Set();
@@ -432,7 +458,13 @@ _SCRIPT = r"""
   let offsetX = 0;
   let offsetY = 0;
   let alpha = 1;
+  const minimumAlpha = .008;
+  const maximumLayoutIterations = nodes.length > 2000 ? 80 : (nodes.length > 500 ? 120 : 180);
+  const alphaDecay = Math.pow(minimumAlpha, 1 / maximumLayoutIterations);
+  let layoutIteration = 0;
+  let maximumMotion = Infinity;
   let animationPending = false;
+  let filterPending = false;
   let dragged = null;
   let panning = false;
   let pointerStart = null;
@@ -440,6 +472,8 @@ _SCRIPT = r"""
   let pixelRatio = 1;
   let width = 1;
   let height = 1;
+  let activeNodes = nodes;
+  let activeEdges = edges;
 
   function hash(value) {
     let result = 2166136261;
@@ -467,19 +501,22 @@ _SCRIPT = r"""
 
   function loadPositions() {
     seedPositions();
+    let restored = 0;
     try {
       const saved = JSON.parse(localStorage.getItem(layoutKey) || "null");
-      if (!saved || typeof saved !== "object") return;
+      if (!saved || typeof saved !== "object") return false;
       nodes.forEach(node => {
         const point = saved[node.id];
         if (Array.isArray(point) && Number.isFinite(point[0]) && Number.isFinite(point[1])) {
           node.x = point[0];
           node.y = point[1];
+          restored += 1;
         }
       });
     } catch (_) {
       // Storage can be unavailable for local files; visualization still works.
     }
+    return restored > 0;
   }
 
   function savePositions() {
@@ -492,12 +529,17 @@ _SCRIPT = r"""
   }
 
   function visibleNodes() {
-    return nodes.filter(node => node.visible);
+    return activeNodes;
   }
 
   function visibleEdges() {
+    return activeEdges;
+  }
+
+  function rebuildVisibilityCache() {
+    activeNodes = nodes.filter(node => node.visible);
     const relation = relationFilter.value;
-    return edges.filter(edge => {
+    activeEdges = edges.filter(edge => {
       const source = byId.get(edge.source);
       const target = byId.get(edge.target);
       return source.visible && target.visible && (relation === "all" || edge.kind === relation);
@@ -557,15 +599,13 @@ _SCRIPT = r"""
     const tags = [...selectedTags];
     const matchesById = new Map();
     nodes.forEach(node => {
-      const haystack = [node.id, node.title, node.summary || "", ...node.tags, ...node.aliases]
-        .join(" ").toLocaleLowerCase();
       const matchesTags = !tags.length || (tagMatch.value === "all"
-        ? tags.every(tag => node.tags.includes(tag))
-        : tags.some(tag => node.tags.includes(tag)));
+        ? tags.every(tag => node.tagSet.has(tag))
+        : tags.some(tag => node.tagSet.has(tag)));
       const matches = selectedKinds.has(node.kind)
         && (status === "all" || node.status === status)
         && matchesTags
-        && (!query || haystack.includes(query));
+        && (!query || node.searchText.includes(query));
       matchesById.set(node.id, matches);
     });
     const linked = visibilityMode.value === "linked";
@@ -589,8 +629,9 @@ _SCRIPT = r"""
         ? owners.some(ownerId => visibleAnchorIds.has(ownerId))
         : showUnlinked.checked && matches;
     });
-    const shownNodes = visibleNodes().length;
-    const shownEdges = visibleEdges().length;
+    rebuildVisibilityCache();
+    const shownNodes = activeNodes.length;
+    const shownEdges = activeEdges.length;
     counts.textContent = `${shownNodes} nodes · ${shownEdges} relations${linked ? ` · ${visibleAnchorIds.size} anchors` : ""}`;
     tagPickerSummary.textContent = tags.length
       ? `tags: ${tags.length} (${tagMatch.value})`
@@ -707,12 +748,17 @@ _SCRIPT = r"""
       schedule();
       return;
     }
-    const xs = visible.map(node => node.x);
-    const ys = visible.map(node => node.y);
-    const minX = Math.min(...xs) - 60;
-    const maxX = Math.max(...xs) + 60;
-    const minY = Math.min(...ys) - 60;
-    const maxY = Math.max(...ys) + 60;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    visible.forEach(node => {
+      minX = Math.min(minX, node.x);
+      maxX = Math.max(maxX, node.x);
+      minY = Math.min(minY, node.y);
+      maxY = Math.max(maxY, node.y);
+    });
+    minX -= 60; maxX += 60; minY -= 60; maxY += 60;
     scale = Math.max(.08, Math.min(2.4, Math.min(width / (maxX - minX), height / (maxY - minY))));
     offsetX = width / 2 - (minX + maxX) / 2 * scale;
     offsetY = height / 2 - (minY + maxY) / 2 * scale;
@@ -720,8 +766,6 @@ _SCRIPT = r"""
   }
 
   function simulate() {
-    const activeNodes = visibleNodes();
-    const activeEdges = visibleEdges();
     activeEdges.forEach(edge => {
       const source = byId.get(edge.source);
       const target = byId.get(edge.target);
@@ -738,16 +782,20 @@ _SCRIPT = r"""
     const cellSize = 92;
     const buckets = new Map();
     activeNodes.forEach(node => {
-      const key = `${Math.floor(node.x / cellSize)},${Math.floor(node.y / cellSize)}`;
-      if (!buckets.has(key)) buckets.set(key, []);
-      buckets.get(key).push(node);
+      const cellX = Math.floor(node.x / cellSize);
+      const cellY = Math.floor(node.y / cellSize);
+      if (!buckets.has(cellX)) buckets.set(cellX, new Map());
+      const column = buckets.get(cellX);
+      if (!column.has(cellY)) column.set(cellY, []);
+      column.get(cellY).push(node);
     });
     activeNodes.forEach(node => {
       const cellX = Math.floor(node.x / cellSize);
       const cellY = Math.floor(node.y / cellSize);
       for (let ox = -1; ox <= 1; ox += 1) {
         for (let oy = -1; oy <= 1; oy += 1) {
-          const neighbors = buckets.get(`${cellX + ox},${cellY + oy}`) || [];
+          const column = buckets.get(cellX + ox);
+          const neighbors = (column && column.get(cellY + oy)) || [];
           neighbors.forEach(other => {
             if (other.index <= node.index) return;
             let dx = other.x - node.x;
@@ -766,14 +814,18 @@ _SCRIPT = r"""
       node.vx += -node.x * .000025 * alpha;
       node.vy += -node.y * .000025 * alpha;
     });
+    let motion = 0;
     activeNodes.forEach(node => {
       if (dragged === node) return;
       node.vx *= .88;
       node.vy *= .88;
       node.x += node.vx;
       node.y += node.vy;
+      motion = Math.max(motion, Math.hypot(node.vx, node.vy));
     });
-    alpha *= .984;
+    alpha *= alphaDecay;
+    layoutIteration += 1;
+    return motion;
   }
 
   function nodeRadius(node) {
@@ -809,12 +861,18 @@ _SCRIPT = r"""
   function draw() {
     context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
     context.clearRect(0, 0, width, height);
-    const activeEdges = visibleEdges();
+    const drawRelationLabels = showLabels.checked && activeEdges.length <= 1000 && scale > .42;
+    const drawNodeLabels = activeNodes.length <= 1500;
     activeEdges.forEach(edge => {
       const sourceNode = byId.get(edge.source);
       const targetNode = byId.get(edge.target);
       const source = screen(sourceNode);
       const target = screen(targetNode);
+      const margin = 30;
+      if ((source.x < -margin && target.x < -margin)
+        || (source.x > width + margin && target.x > width + margin)
+        || (source.y < -margin && target.y < -margin)
+        || (source.y > height + margin && target.y > height + margin)) return;
       drawArrow(
         source,
         target,
@@ -822,7 +880,7 @@ _SCRIPT = r"""
         nodeRadius(sourceNode),
         nodeRadius(targetNode)
       );
-      if (showLabels.checked && scale > .42) {
+      if (drawRelationLabels) {
         context.font = "11px ui-monospace, SFMono-Regular, Consolas, monospace";
         context.textAlign = "center";
         context.textBaseline = "bottom";
@@ -830,9 +888,10 @@ _SCRIPT = r"""
         context.fillText(edge.kind, (source.x + target.x) / 2, (source.y + target.y) / 2 - 3);
       }
     });
-    visibleNodes().forEach(node => {
+    activeNodes.forEach(node => {
       const point = screen(node);
       const radius = nodeRadius(node);
+      if (point.x < -80 || point.x > width + 80 || point.y < -80 || point.y > height + 80) return;
       const anchor = visibilityMode.value === "linked" && anchorKinds.has(node.kind);
       if (anchor) {
         context.beginPath();
@@ -848,7 +907,7 @@ _SCRIPT = r"""
       context.lineWidth = node.id === data.focus ? 3 : (node.id === selectedId ? 2 : 1);
       context.strokeStyle = node.id === data.focus ? "#f8d66d" : (node.id === selectedId ? "#ffffff" : "rgba(5, 10, 20, .8)");
       context.stroke();
-      if (scale > .48 || node.id === selectedId || node.id === data.focus) {
+      if ((drawNodeLabels && scale > .48) || node.id === selectedId || node.id === data.focus) {
         context.font = node.id === selectedId || anchor
           ? "600 12px Inter, system-ui, sans-serif"
           : "12px Inter, system-ui, sans-serif";
@@ -861,11 +920,37 @@ _SCRIPT = r"""
     });
   }
 
+  function layoutIsRunning() {
+    return alpha > minimumAlpha
+      && layoutIteration < maximumLayoutIterations
+      && !(layoutIteration >= 24 && maximumMotion < .01);
+  }
+
+  function updateLayoutProgress(running, paused = false) {
+    const ratio = running
+      ? Math.min(1, layoutIteration / maximumLayoutIterations)
+      : 1;
+    layoutProgress.value = Math.round(ratio * 100);
+    layoutStatus.textContent = paused
+      ? `Layout paused · ${Math.round(ratio * 100)}%`
+      : (running ? `Layout ${Math.round(ratio * 100)}%` : "Layout ready");
+  }
+
+  function restartLayout(heat = 1) {
+    alpha = Math.max(alpha, heat);
+    layoutIteration = 0;
+    maximumMotion = Infinity;
+    updateLayoutProgress(true);
+    schedule();
+  }
+
   function frame() {
     animationPending = false;
-    if (alpha > .006 && !panning) simulate();
+    if (layoutIsRunning() && !panning) maximumMotion = simulate();
     draw();
-    if (alpha > .006 || dragged) schedule();
+    const running = layoutIsRunning();
+    updateLayoutProgress(running, panning && running);
+    if (running && !panning) schedule();
   }
 
   function schedule() {
@@ -976,7 +1061,7 @@ _SCRIPT = r"""
       appendText(details, "div", node.body.trim(), "body");
     }
 
-    const adjacent = edges.filter(edge => edge.source === node.id || edge.target === node.id);
+    const adjacent = adjacentById.get(node.id) || [];
     appendText(details, "h3", `Relations (${adjacent.length})`);
     if (!adjacent.length) appendText(details, "p", "No adjacent relations.", "empty");
     adjacent.forEach(edge => {
@@ -1005,10 +1090,11 @@ _SCRIPT = r"""
     if (node) {
       dragged = node;
       selectNode(node.id);
-      alpha = Math.max(alpha, .12);
+      restartLayout(.12);
     } else {
       panning = true;
       panStart = { x: offsetX, y: offsetY };
+      schedule();
     }
   });
 
@@ -1026,17 +1112,27 @@ _SCRIPT = r"""
     schedule();
   });
 
-  function endPointer(event) {
-    if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+  function clearPointer() {
     if (dragged) savePositions();
     dragged = null;
     panning = false;
     pointerStart = null;
+    panStart = null;
     canvas.classList.remove("dragging");
+  }
+
+  function endPointer(event) {
+    const captured = canvas.hasPointerCapture(event.pointerId);
+    clearPointer();
+    if (captured) canvas.releasePointerCapture(event.pointerId);
     schedule();
   }
   canvas.addEventListener("pointerup", endPointer);
   canvas.addEventListener("pointercancel", endPointer);
+  canvas.addEventListener("lostpointercapture", () => {
+    clearPointer();
+    schedule();
+  });
 
   canvas.addEventListener("wheel", event => {
     event.preventDefault();
@@ -1050,7 +1146,14 @@ _SCRIPT = r"""
     schedule();
   }, { passive: false });
 
-  search.addEventListener("input", applyFilters);
+  search.addEventListener("input", () => {
+    if (filterPending) return;
+    filterPending = true;
+    requestAnimationFrame(() => {
+      filterPending = false;
+      applyFilters();
+    });
+  });
   visibilityMode.addEventListener("change", applyFilters);
   showUnlinked.addEventListener("change", applyFilters);
   relationFilter.addEventListener("change", applyFilters);
@@ -1067,11 +1170,18 @@ _SCRIPT = r"""
   document.getElementById("reset-layout").addEventListener("click", () => {
     try { localStorage.removeItem(layoutKey); } catch (_) { /* ignored */ }
     seedPositions();
-    alpha = 1;
     fit();
-    schedule();
+    restartLayout(1);
   });
   window.addEventListener("resize", resize);
+  window.addEventListener("blur", () => {
+    clearPointer();
+    schedule();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) clearPointer();
+    schedule();
+  });
   document.addEventListener("click", event => {
     if (tagPicker.open && !tagPicker.contains(event.target)) tagPicker.open = false;
     if (anchorPicker.open && !anchorPicker.contains(event.target)) anchorPicker.open = false;
@@ -1083,7 +1193,7 @@ _SCRIPT = r"""
     }
   });
 
-  loadPositions();
+  if (loadPositions()) alpha = .08;
   buildControls();
   resize();
   applyFilters();
@@ -1117,6 +1227,8 @@ def render_graph_html(view: GraphView) -> str:
       <h1>{title}</h1>
       <span class="subtitle">{focus_note}</span>
       <span id="counts"></span>
+      <progress id="layout-progress" max="100" value="0" aria-label="Graph layout progress"></progress>
+      <span id="layout-status" aria-live="polite">Layout 0%</span>
     </header>
     <div class="toolbar" aria-label="Graph controls">
       <input id="search" type="search" placeholder="Search title, ID, tag or alias" aria-label="Search nodes">

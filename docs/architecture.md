@@ -739,6 +739,11 @@ GraphSnapshot. HTML не зависит от CDN, не исполняет пол
 браузере и не меняют GraphViewModel. Selection карточки не зависит от Canvas
 visibility: скрытая фильтром Node остаётся доступной через relations.
 
+Force layout имеет ограниченное число итераций, adaptive early stop и видимый
+progress. Visible nodes/edges, search text и adjacency для карточек кешируются;
+pan/drag инициируют кадры по событиям и не создают самоподдерживающийся
+`requestAnimationFrame` loop.
+
 Linked context — также presentation-only projection. Настраиваемые Anchor kinds
 по умолчанию равны `hypothesis` и `claim`. После исключения Anchor и слабых
 `related_to` relations компоненты Context получают все граничащие Anchor. Такой
@@ -1179,16 +1184,26 @@ suggestion: Create the target or remove the relation
 
 ## 14. Производительность без БД
 
-Открытие Project и явный `validate` сканируют vault целиком. Стоимость:
+Открытие Project и явный `validate` сканируют vault целиком. `Project.open`
+читает и декодирует каждый Node ровно один раз: те же decoded documents сначала
+проходят validation, затем превращаются в GraphSnapshot. Restricted YAML также
+проверяет запрещённые aliases/tags в одном parse-проходе и не использует
+C-backed loader. Стоимость:
 
 ```text
 загрузка: O(число файлов + размер front matter)
 построение adjacency: O(V + E)
 neighbors: O(степень узла)
 traverse: O(посещённые V + E)
+find_path: O(посещённые V + E), восстановление по predecessor index
 обычная мутация: O(размер source + затронутые adjacency/aliases)
 проверка нового cycle: O(достижимое из target поддерево)
 ```
+
+Полная проверка cycles использует iterative DFS и не зависит от Python
+recursion limit. Потенциально долгие application-операции принимают typed
+`ProgressEvent` callback; CLI отображает его как progress bar только в
+human-mode/TTY.
 
 Mutation path не выполняет повторный file scan, full validation или reload.
 Project использует copy-on-write snapshot: полная неглубокая копия индексов

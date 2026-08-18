@@ -34,6 +34,11 @@ Markdown/YAML и может быть закоммичен в Git.
 7. После серии изменений выполните `rf validate --json` и
    `rf format --check --json`.
 
+Progress bar намеренно отключён в `--json` и для raw `graph export`: stdout и
+stderr остаются пригодными для строгого разбора. Если автоматизация запускает
+human-mode и ей нужен heartbeat в логах, используйте корневой флаг
+`rf --progress COMMAND ...`.
+
 Инициализация не использует JSON input, но поддерживает JSON output:
 
 ```bash
@@ -396,12 +401,23 @@ CLI не выполняет `git add`, commit, pull или push. Решение 
 Если автоматизация написана на Python, можно не сериализовать команды:
 
 ```python
+import sys
 from pathlib import Path
 
-from research_framework import Actor, Project, RelationDraft, RunDraft
-from research_framework import EdgeKind
+from research_framework import (
+    Actor,
+    EdgeKind,
+    ProgressEvent,
+    Project,
+    RelationDraft,
+    RunDraft,
+)
 
-project = Project.open(Path("research-graph"))
+def progress(event: ProgressEvent) -> None:
+    print(event.phase, event.current, event.total, file=sys.stderr)
+
+
+project = Project.open(Path("research-graph"), progress=progress)
 run = project.create_node(
     RunDraft(
         title="Benchmark 32k",
@@ -416,6 +432,10 @@ run = project.create_node(
 )
 print(run.id, run.revision)
 ```
+
+Callback получает события `discovering`, `loading`, `validating` и `indexing`;
+`Project.format(progress=...)` дополнительно сообщает `formatting`. Это позволяет
+агенту отличить долгую обработку от зависания без разбора human progress bar.
 
 `Project.snapshot()` возвращает immutable `GraphSnapshot`; после мутации
 возьмите новый snapshot. Перехватывайте подклассы `ResearchFrameworkError` и

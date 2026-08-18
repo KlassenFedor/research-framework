@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 import yaml
+from yaml.events import AliasEvent, CollectionStartEvent, NodeEvent, ScalarEvent
 from yaml.nodes import MappingNode, ScalarNode
-from yaml.tokens import AliasToken, AnchorToken, TagToken
 
 
 class RestrictedYamlError(ValueError):
@@ -26,6 +26,28 @@ class _ComplexKey(ValueError):
 
 class RestrictedLoader(yaml.SafeLoader):
     """Safe YAML 1.2-ish loader constrained to JSON-compatible values."""
+
+    def compose_node(self, parent: Any, index: Any) -> yaml.Node:
+        event: NodeEvent = self.peek_event()  # type: ignore[no-untyped-call]
+        if isinstance(event, AliasEvent):
+            raise RestrictedYamlError(
+                "yaml_alias_forbidden",
+                "YAML anchors and aliases are forbidden",
+            )
+        if isinstance(event, (CollectionStartEvent, ScalarEvent)):
+            if event.anchor is not None:
+                raise RestrictedYamlError(
+                    "yaml_alias_forbidden",
+                    "YAML anchors and aliases are forbidden",
+                )
+            if event.tag is not None:
+                raise RestrictedYamlError(
+                    "yaml_tag_forbidden",
+                    "explicit YAML tags are forbidden",
+                )
+        node = super().compose_node(parent, index)
+        assert node is not None
+        return node
 
 
 # Copy before modifying: PyYAML stores this table on the base class.
@@ -113,18 +135,6 @@ def _ensure_json_compatible(value: Any, path: str = "$") -> None:
 
 def load_restricted_yaml(text: str) -> dict[str, Any]:
     try:
-        tokens = yaml.scan(text, Loader=RestrictedLoader)
-        for token in tokens:
-            if isinstance(token, (AnchorToken, AliasToken)):
-                raise RestrictedYamlError(
-                    "yaml_alias_forbidden",
-                    "YAML anchors and aliases are forbidden",
-                )
-            if isinstance(token, TagToken):
-                raise RestrictedYamlError(
-                    "yaml_tag_forbidden",
-                    "explicit YAML tags are forbidden",
-                )
         value = yaml.load(text, Loader=RestrictedLoader)
     except RestrictedYamlError:
         raise
