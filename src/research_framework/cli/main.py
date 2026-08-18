@@ -19,6 +19,7 @@ from research_framework import (
     AssessmentDraft,
     ClaimDraft,
     DecisionDraft,
+    EdgeNotFound,
     EvidenceDraft,
     ExperimentDraft,
     HypothesisDraft,
@@ -108,17 +109,57 @@ def _error(code: str, message: str, details: Mapping[str, Any] | None = None) ->
     )
 
 
-def _actor(value: Mapping[str, Any]) -> Actor:
+def _require_request_fields(
+    value: Mapping[str, Any],
+    *,
+    name: str,
+    allowed: set[str],
+    required: set[str] | None = None,
+) -> None:
+    unknown = set(value) - allowed
+    if unknown:
+        field = min(unknown)
+        raise CliUsageError(f"unknown {name} field: {field}")
+    missing = set(required or ()) - set(value)
+    if missing:
+        field = min(missing)
+        raise CliUsageError(f"missing {name} field: {field}")
+
+
+def _non_blank_string(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise CliUsageError(f"{field} must be a non-blank string")
+    return value
+
+
+def _actor(value: Any) -> Actor:
+    if not isinstance(value, dict):
+        raise CliUsageError("actor must be an object")
+    _require_request_fields(
+        value,
+        name="actor",
+        allowed={"kind", "id", "run_id", "model"},
+        required={"kind", "id"},
+    )
     kind = value.get("kind")
+    if kind not in {"human", "agent"}:
+        raise CliUsageError("actor.kind must be human or agent")
+    actor_id = _non_blank_string(value.get("id"), "actor.id")
+    run_id = (
+        _non_blank_string(value["run_id"], "actor.run_id")
+        if "run_id" in value
+        else None
+    )
+    model = (
+        _non_blank_string(value["model"], "actor.model") if "model" in value else None
+    )
     if kind == "human":
-        return Actor.human(str(value.get("id", "")))
-    if kind == "agent":
-        return Actor.agent(
-            str(value.get("id", "")),
-            run_id=value.get("run_id"),
-            model=value.get("model"),
-        )
-    raise CliUsageError("actor.kind must be human or agent")
+        if run_id is not None:
+            raise CliUsageError("actor.run_id is only valid for agents")
+        if model is not None:
+            raise CliUsageError("actor.model is only valid for agents")
+        return Actor.human(actor_id)
+    return Actor.agent(actor_id, run_id=run_id, model=model)
 
 
 def _human_actor(actor_id: str | None) -> Actor:
@@ -157,20 +198,79 @@ _DRAFTS: dict[str, type[NodeDraft]] = {
     "decision": DecisionDraft,
 }
 
+_DRAFT_STRING_FIELDS = {
+    "title",
+    "summary",
+    "body",
+    "question",
+    "scope",
+    "statement",
+    "falsification_criteria",
+    "objective",
+    "method",
+    "success_criteria",
+    "started_at",
+    "finished_at",
+    "outcome",
+    "observation",
+    "evidence_kind",
+    "collected_at",
+    "verdict",
+    "confidence",
+    "review_state",
+    "source_kind",
+    "locator",
+    "citation",
+    "accessed_at",
+    "media_type",
+    "sha256",
+    "rationale",
+}
+_DRAFT_STRING_LIST_FIELDS = {"tags", "aliases", "assumptions", "limitations"}
+
+
+def _validate_draft_values(data: Mapping[str, Any]) -> None:
+    for field in sorted(_DRAFT_STRING_FIELDS & set(data)):
+        if not isinstance(data[field], str):
+            raise CliUsageError(f"{field} must be a string")
+    for field in sorted(_DRAFT_STRING_LIST_FIELDS & set(data)):
+        value = data[field]
+        if not isinstance(value, list):
+            raise CliUsageError(f"{field} must be a list of non-blank strings")
+        if any(not isinstance(item, str) or not item.strip() for item in value):
+            raise CliUsageError(f"{field} must be a list of non-blank strings")
+    if "environment" in data and not isinstance(data["environment"], dict):
+        raise CliUsageError("environment must be an object")
+    if "protocol_version" in data:
+        protocol = data["protocol_version"]
+        if not (
+            (isinstance(protocol, int) and not isinstance(protocol, bool))
+            or (isinstance(protocol, str) and bool(protocol.strip()))
+        ):
+            raise CliUsageError(
+                "protocol_version must be an integer or non-blank string"
+            )
+    if "size" in data:
+        size = data["size"]
+        if not isinstance(size, int) or isinstance(size, bool):
+            raise CliUsageError("size must be an integer")
+
 
 def _draft(kind: str, data: Mapping[str, Any]) -> NodeDraft:
     constructor = _DRAFTS[kind]
     allowed = {field.name for field in dataclasses.fields(constructor)}
-    values = {key: value for key, value in data.items() if key in allowed}
+    unknown = set(data) - allowed
+    if unknown:
+        field = min(unknown)
+        raise CliUsageError(f"unknown {kind} field: {field}")
+    _validate_draft_values(data)
     try:
-        return constructor(**values)
+        return constructor(**dict(data))
     except (TypeError, ValueError) as error:
         raise CliUsageError(str(error)) from error
 
 
 def _initial_relations(value: Any) -> tuple[RelationDraft, ...]:
-    if value is None:
-        return ()
     if not isinstance(value, list):
         raise CliUsageError("initial_relations must be a list")
     result: list[RelationDraft] = []
@@ -183,16 +283,24 @@ def _initial_relations(value: Any) -> tuple[RelationDraft, ...]:
             field = min(unknown)
             raise CliUsageError(f"unknown initial_relations[{index}] field: {field}")
         target = item.get("target")
-        if not isinstance(target, str):
+        if not isinstance(target, str) or not target.strip():
             raise CliUsageError(
-                f"invalid initial_relations[{index}]: target must be a string"
+                f"invalid initial_relations[{index}]: target must be a non-blank string"
+            )
+        rationale = item.get("rationale")
+        if "rationale" in item and (
+            not isinstance(rationale, str) or not rationale.strip()
+        ):
+            raise CliUsageError(
+                f"invalid initial_relations[{index}]: "
+                "rationale must be a non-blank string"
             )
         try:
             result.append(
                 RelationDraft(
                     kind=EdgeKind(item.get("kind")),
                     target=target,
-                    rationale=item.get("rationale"),
+                    rationale=rationale,
                 )
             )
         except (TypeError, ValueError) as error:
@@ -423,6 +531,11 @@ def _handle(args: argparse.Namespace) -> int:
             _success(data, warnings)
         else:
             print("Project is valid")
+            for warning in warnings:
+                print(
+                    f"warning: {warning.code}: {warning.message}",
+                    file=sys.stderr,
+                )
         return 0
 
     if args.command == "format":
@@ -478,7 +591,20 @@ def _handle(args: argparse.Namespace) -> int:
                         "--from-json cannot be combined with body input flags"
                     )
                 request = _read_request(args.from_json)
-                actor = _actor(request.pop("actor", {}))
+                _require_request_fields(
+                    request,
+                    name=args.kind,
+                    allowed={
+                        "actor",
+                        "initial_relations",
+                        *(
+                            field.name
+                            for field in dataclasses.fields(_DRAFTS[args.kind])
+                        ),
+                    },
+                    required={"actor"},
+                )
+                actor = _actor(request.pop("actor"))
                 relations = _initial_relations(request.pop("initial_relations", []))
                 values = request
             else:
@@ -536,11 +662,23 @@ def _handle(args: argparse.Namespace) -> int:
             )
         elif args.node_command == "update":
             request = _read_request(args.from_json)
+            _require_request_fields(
+                request,
+                name="node update",
+                allowed={"patch", "expected_revision", "actor"},
+                required={"patch", "expected_revision", "actor"},
+            )
+            patch = request["patch"]
+            if not isinstance(patch, dict):
+                raise CliUsageError("patch must be an object")
+            expected_revision = _non_blank_string(
+                request["expected_revision"], "expected_revision"
+            )
             updated = project.update_node(
                 args.reference,
-                patch=request.get("patch", {}),
-                expected_revision=request.get("expected_revision", ""),
-                actor=_actor(request.get("actor", {})),
+                patch=patch,
+                expected_revision=expected_revision,
+                actor=_actor(request["actor"]),
             )
             data = _node_to_dict(updated)
             _mutation_success(
@@ -568,11 +706,21 @@ def _handle(args: argparse.Namespace) -> int:
         if args.link_command == "add":
             if args.from_json is not None:
                 request = _read_request(args.from_json)
-                source = request.get("source")
-                kind = request.get("kind")
-                target = request.get("target")
-                rationale = request.get("rationale")
-                actor = _actor(request.get("actor", {}))
+                _require_request_fields(
+                    request,
+                    name="link add",
+                    allowed={"source", "kind", "target", "rationale", "actor"},
+                    required={"source", "kind", "target", "actor"},
+                )
+                source = _non_blank_string(request["source"], "source")
+                kind = _non_blank_string(request["kind"], "kind")
+                target = _non_blank_string(request["target"], "target")
+                rationale = (
+                    _non_blank_string(request["rationale"], "rationale")
+                    if "rationale" in request
+                    else None
+                )
+                actor = _actor(request["actor"])
             else:
                 source, kind, target = args.source, args.kind, args.target
                 rationale = args.rationale
@@ -689,7 +837,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print(str(error), file=sys.stderr)
         return 3
-    except (NodeNotFound, AmbiguousReference, ProjectNotFound) as error:
+    except (
+        NodeNotFound,
+        EdgeNotFound,
+        AmbiguousReference,
+        ProjectNotFound,
+    ) as error:
         if json_mode:
             _error(error.code, str(error), error.details)
         else:

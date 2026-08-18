@@ -174,6 +174,209 @@ def test_node_create_accepts_noninteractive_json_from_stdin(
 
 @pytest.mark.contract
 @pytest.mark.cli
+@pytest.mark.parametrize(
+    ("kind", "invalid", "message"),
+    [
+        ("claim", {"summmary": "must not disappear"}, "unknown claim field"),
+        ("claim", {"tags": "abc"}, "tags must be a list"),
+        ("claim", {"aliases": "C-main"}, "aliases must be a list"),
+        ("claim", {"body": 42}, "body must be a string"),
+        (
+            "claim",
+            {"actor": {"kind": "human", "id": 42}},
+            "actor.id must be a non-blank string",
+        ),
+        (
+            "claim",
+            {"actor": {"kind": "agent", "id": "writer", "run_id": None}},
+            "actor.run_id must be a non-blank string",
+        ),
+        (
+            "claim",
+            {"actor": {"kind": "human", "id": "writer", "run_id": "run-42"}},
+            "actor.run_id is only valid for agents",
+        ),
+        (
+            "claim",
+            {"actor": {"kind": "human", "id": "writer", "extra": "ignored"}},
+            "unknown actor field",
+        ),
+        ("claim", {"initial_relations": None}, "initial_relations must be a list"),
+        (
+            "claim",
+            {
+                "initial_relations": [
+                    {
+                        "kind": "related_to",
+                        "target": NODE_IDS["claim"],
+                        "rationale": None,
+                    }
+                ]
+            },
+            "rationale must be a non-blank string",
+        ),
+        (
+            "hypothesis",
+            {"assumptions": "fixed benchmark"},
+            "assumptions must be a list",
+        ),
+        ("assessment", {"limitations": "small sample"}, "limitations must be a list"),
+        ("run", {"environment": []}, "environment must be an object"),
+        ("experiment", {"protocol_version": True}, "protocol_version must be"),
+        ("artifact", {"size": True}, "size must be an integer"),
+    ],
+)
+def test_node_create_json_rejects_unknown_fields_and_wrong_types_without_writing(
+    example_project: Path,
+    kind: str,
+    invalid: dict[str, object],
+    message: str,
+) -> None:
+    valid_by_kind: dict[str, dict[str, object]] = {
+        "claim": {"statement": "Strict input preserves every field."},
+        "hypothesis": {
+            "statement": "Strict input prevents coercion.",
+            "falsification_criteria": "A malformed request is accepted.",
+        },
+        "assessment": {
+            "verdict": "supported",
+            "confidence": "high",
+            "review_state": "approved",
+        },
+        "run": {
+            "started_at": "2026-08-18T10:00:00+07:00",
+            "outcome": "running",
+        },
+        "experiment": {
+            "objective": "Reject coercion.",
+            "method": "Submit malformed JSON.",
+            "success_criteria": "The request fails.",
+            "protocol_version": 1,
+        },
+        "artifact": {"locator": "artifacts/result.json"},
+    }
+    request = {
+        "title": "Strict JSON input",
+        **valid_by_kind[kind],
+        "actor": {"kind": "human", "id": "creator"},
+        **invalid,
+    }
+    before = set((example_project / "research").rglob("*.md"))
+
+    result = run_cli(
+        example_project,
+        "node",
+        "create",
+        kind,
+        "--from-json",
+        "-",
+        "--json",
+        input_text=json.dumps(request),
+    )
+
+    payload = json_stdout(result)
+    assert result.returncode == 2
+    assert payload["error"]["code"] == "invalid_arguments"
+    assert message in payload["error"]["message"]
+    assert set((example_project / "research").rglob("*.md")) == before
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+@pytest.mark.parametrize(
+    ("invalid", "message"),
+    [
+        ({"extra": "ignored"}, "unknown node update field"),
+        ({"patch": []}, "patch must be an object"),
+        ({"expected_revision": 42}, "expected_revision must be a non-blank string"),
+        (
+            {"actor": {"kind": "human", "id": 42}},
+            "actor.id must be a non-blank string",
+        ),
+    ],
+)
+def test_node_update_json_rejects_invalid_envelope_without_writing(
+    example_project: Path,
+    invalid: dict[str, object],
+    message: str,
+) -> None:
+    claim = next((example_project / "research" / "claims").glob("*.md"))
+    before = claim.read_bytes()
+    shown = run_cli(example_project, "node", "show", NODE_IDS["claim"], "--json")
+    request = {
+        "patch": {"summary": "Valid update"},
+        "expected_revision": json_stdout(shown)["data"]["revision"],
+        "actor": {"kind": "human", "id": "reviewer"},
+        **invalid,
+    }
+
+    result = run_cli(
+        example_project,
+        "node",
+        "update",
+        NODE_IDS["claim"],
+        "--from-json",
+        "-",
+        "--json",
+        input_text=json.dumps(request),
+    )
+
+    payload = json_stdout(result)
+    assert result.returncode == 2
+    assert payload["error"]["code"] == "invalid_arguments"
+    assert message in payload["error"]["message"]
+    assert claim.read_bytes() == before
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+@pytest.mark.parametrize(
+    ("invalid", "message"),
+    [
+        ({"extra": "ignored"}, "unknown link add field"),
+        ({"source": 42}, "source must be a non-blank string"),
+        ({"rationale": None}, "rationale must be a non-blank string"),
+        (
+            {"actor": {"kind": "human", "id": 42}},
+            "actor.id must be a non-blank string",
+        ),
+    ],
+)
+def test_link_add_json_rejects_invalid_envelope_without_writing(
+    example_project: Path,
+    invalid: dict[str, object],
+    message: str,
+) -> None:
+    evidence = next((example_project / "research" / "evidence").glob("*.md"))
+    before = evidence.read_bytes()
+    request = {
+        "source": NODE_IDS["evidence"],
+        "kind": "supports",
+        "target": NODE_IDS["claim"],
+        "rationale": "The measurement supports the claim.",
+        "actor": {"kind": "human", "id": "reviewer"},
+        **invalid,
+    }
+
+    result = run_cli(
+        example_project,
+        "link",
+        "add",
+        "--from-json",
+        "-",
+        "--json",
+        input_text=json.dumps(request),
+    )
+
+    payload = json_stdout(result)
+    assert result.returncode == 2
+    assert payload["error"]["code"] == "invalid_arguments"
+    assert message in payload["error"]["message"]
+    assert evidence.read_bytes() == before
+
+
+@pytest.mark.contract
+@pytest.mark.cli
 def test_node_create_accepts_initial_relations_from_json(
     example_project: Path,
 ) -> None:
@@ -825,6 +1028,23 @@ def test_missing_and_ambiguous_references_use_exit_code_four(
 
 @pytest.mark.contract
 @pytest.mark.cli
+def test_missing_edge_uses_not_found_exit_code_four(example_project: Path) -> None:
+    result = run_cli(
+        example_project,
+        "link",
+        "remove",
+        "rel-01M00000000000000000000000",
+        "--actor",
+        "reviewer",
+        "--json",
+    )
+
+    assert result.returncode == 4
+    assert json_stdout(result)["error"]["code"] == "edge_not_found"
+
+
+@pytest.mark.contract
+@pytest.mark.cli
 def test_invalid_cli_arguments_use_exit_code_two(example_project: Path) -> None:
     result = run_cli(example_project, "graph", "traverse", "--depth", "not-an-int")
 
@@ -866,6 +1086,21 @@ def test_validation_warnings_do_not_make_command_fail(example_project: Path) -> 
     assert payload["ok"] is True
     assert payload["warnings"]
     assert all(item["severity"] == "warning" for item in payload["warnings"])
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_validation_human_mode_prints_warnings_to_stderr(
+    example_project: Path,
+) -> None:
+    hypothesis = next((example_project / "research" / "hypotheses").glob("*.md"))
+    archive_fixture_node(hypothesis)
+
+    result = run_cli(example_project, "validate")
+
+    assert result.returncode == 0
+    assert result.stdout == "Project is valid\n"
+    assert "warning: archived_target:" in result.stderr
 
 
 @pytest.mark.contract
