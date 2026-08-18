@@ -4,7 +4,7 @@ import html
 import json
 import os
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -146,6 +146,67 @@ def build_graph_view(
     )
 
 
+def compute_anchor_associations(
+    view: GraphView,
+    *,
+    anchor_kinds: Collection[str],
+) -> dict[str, tuple[str, ...]]:
+    """Associate context nodes with anchor-bounded graph components.
+
+    Relations are treated as undirected for presentation. Anchor nodes form
+    component boundaries, and the intentionally weak ``related_to`` relation
+    does not imply automatic ownership.
+    """
+
+    accepted_kinds = set(anchor_kinds)
+    node_by_id = {node.id: node for node in view.nodes}
+    anchor_ids = {node.id for node in view.nodes if node.kind in accepted_kinds}
+    context_ids = set(node_by_id) - anchor_ids
+    adjacency: dict[str, set[str]] = {node_id: set() for node_id in context_ids}
+    boundaries: dict[str, set[str]] = {node_id: set() for node_id in context_ids}
+
+    for edge in view.edges:
+        if edge.kind == "related_to":
+            continue
+        if edge.source not in node_by_id or edge.target not in node_by_id:
+            continue
+        source_is_anchor = edge.source in anchor_ids
+        target_is_anchor = edge.target in anchor_ids
+        if source_is_anchor and not target_is_anchor:
+            boundaries[edge.target].add(edge.source)
+        elif target_is_anchor and not source_is_anchor:
+            boundaries[edge.source].add(edge.target)
+        elif not source_is_anchor and not target_is_anchor:
+            adjacency[edge.source].add(edge.target)
+            adjacency[edge.target].add(edge.source)
+
+    associations: dict[str, tuple[str, ...]] = {
+        anchor_id: (anchor_id,) for anchor_id in sorted(anchor_ids)
+    }
+    visited: set[str] = set()
+    for start in sorted(context_ids):
+        if start in visited:
+            continue
+        component: list[str] = []
+        owners: set[str] = set()
+        pending = [start]
+        visited.add(start)
+        while pending:
+            current = pending.pop()
+            component.append(current)
+            owners.update(boundaries[current])
+            for neighbor in sorted(adjacency[current], reverse=True):
+                if neighbor in visited:
+                    continue
+                visited.add(neighbor)
+                pending.append(neighbor)
+        frozen_owners = tuple(sorted(owners))
+        for node_id in component:
+            associations[node_id] = frozen_owners
+
+    return {node_id: associations.get(node_id, ()) for node_id in sorted(node_by_id)}
+
+
 def _json_for_html(value: Mapping[str, Any]) -> str:
     serialized = json.dumps(
         value,
@@ -272,6 +333,15 @@ h1 { margin: 0; max-width: 60vw; overflow: hidden; text-overflow: ellipsis; whit
 .tag-option:has(input:checked) { border-color: var(--accent); color: var(--text); background: #182743; }
 .tag-option input { accent-color: var(--accent); }
 .tag-count { color: var(--muted); font-size: 11px; }
+.anchor-picker .tag-menu { left: auto; right: 0; }
+#anchor-kind-filters { display: flex; flex-wrap: wrap; gap: 6px; max-height: 230px; overflow: auto; }
+.linked-option { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); white-space: nowrap; }
+.linked-option input { accent-color: var(--accent); }
+.linked-option.inactive { opacity: .5; }
+.role-badge { border: 1px solid var(--accent); color: var(--text); }
+.anchor-reference { padding: 6px 0; border-bottom: 1px solid rgba(43, 56, 82, .7); }
+.anchor-reference button { padding: 0; border: 0; background: transparent; color: var(--accent); text-align: left; }
+.anchor-reference small { display: block; color: var(--muted); }
 .spacer { flex: 1; }
 .workspace { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 340px; min-height: 0; }
 .stage { position: relative; min-width: 0; overflow: hidden; }
@@ -330,6 +400,12 @@ _SCRIPT = r"""
   const tagFilters = document.getElementById("tag-filters");
   const tagMatch = document.getElementById("tag-match");
   const clearTags = document.getElementById("clear-tags");
+  const visibilityMode = document.getElementById("visibility-mode");
+  const anchorPicker = document.getElementById("anchor-picker");
+  const anchorPickerSummary = document.getElementById("anchor-picker-summary");
+  const anchorKindFilters = document.getElementById("anchor-kind-filters");
+  const showUnlinked = document.getElementById("show-unlinked");
+  const showUnlinkedControl = document.getElementById("show-unlinked-control");
   const relationFilter = document.getElementById("relation-filter");
   const statusFilter = document.getElementById("status-filter");
   const counts = document.getElementById("counts");
@@ -345,8 +421,12 @@ _SCRIPT = r"""
   }));
   const byId = new Map(nodes.map(node => [node.id, node]));
   const edges = data.edges.filter(edge => byId.has(edge.source) && byId.has(edge.target));
-  const selectedKinds = new Set(nodes.map(node => node.kind));
+  const availableKinds = [...new Set(nodes.map(node => node.kind))].sort();
+  const selectedKinds = new Set(availableKinds);
   const selectedTags = new Set();
+  const defaultAnchorKinds = availableKinds.filter(kind => kind === "hypothesis" || kind === "claim");
+  if (!defaultAnchorKinds.length && availableKinds.length) defaultAnchorKinds.push(availableKinds[0]);
+  const anchorKinds = new Set(defaultAnchorKinds);
   let selectedId = data.focus || (nodes[0] && nodes[0].id) || null;
   let scale = 1;
   let offsetX = 0;
@@ -424,29 +504,102 @@ _SCRIPT = r"""
     });
   }
 
+  function computeAnchorAssociations() {
+    const anchorIds = new Set(
+      nodes.filter(node => anchorKinds.has(node.kind)).map(node => node.id)
+    );
+    const contextIds = nodes
+      .filter(node => !anchorIds.has(node.id))
+      .map(node => node.id);
+    const adjacency = new Map(contextIds.map(nodeId => [nodeId, new Set()]));
+    const boundaries = new Map(contextIds.map(nodeId => [nodeId, new Set()]));
+
+    edges.forEach(edge => {
+      if (edge.kind === "related_to") return;
+      const sourceIsAnchor = anchorIds.has(edge.source);
+      const targetIsAnchor = anchorIds.has(edge.target);
+      if (sourceIsAnchor && !targetIsAnchor) {
+        boundaries.get(edge.target).add(edge.source);
+      } else if (targetIsAnchor && !sourceIsAnchor) {
+        boundaries.get(edge.source).add(edge.target);
+      } else if (!sourceIsAnchor && !targetIsAnchor) {
+        adjacency.get(edge.source).add(edge.target);
+        adjacency.get(edge.target).add(edge.source);
+      }
+    });
+
+    nodes.forEach(node => { node.anchorIds = anchorIds.has(node.id) ? [node.id] : []; });
+    const visited = new Set();
+    [...contextIds].sort().forEach(start => {
+      if (visited.has(start)) return;
+      const component = [];
+      const owners = new Set();
+      const pending = [start];
+      visited.add(start);
+      while (pending.length) {
+        const current = pending.pop();
+        component.push(current);
+        boundaries.get(current).forEach(ownerId => owners.add(ownerId));
+        [...adjacency.get(current)].sort().reverse().forEach(neighborId => {
+          if (visited.has(neighborId)) return;
+          visited.add(neighborId);
+          pending.push(neighborId);
+        });
+      }
+      const sortedOwners = [...owners].sort();
+      component.forEach(nodeId => { byId.get(nodeId).anchorIds = sortedOwners; });
+    });
+  }
+
   function applyFilters() {
     const query = search.value.trim().toLocaleLowerCase();
     const status = statusFilter.value;
     const tags = [...selectedTags];
+    const matchesById = new Map();
     nodes.forEach(node => {
       const haystack = [node.id, node.title, node.summary || "", ...node.tags, ...node.aliases]
         .join(" ").toLocaleLowerCase();
       const matchesTags = !tags.length || (tagMatch.value === "all"
         ? tags.every(tag => node.tags.includes(tag))
         : tags.some(tag => node.tags.includes(tag)));
-      node.visible = selectedKinds.has(node.kind)
+      const matches = selectedKinds.has(node.kind)
         && (status === "all" || node.status === status)
         && matchesTags
         && (!query || haystack.includes(query));
+      matchesById.set(node.id, matches);
+    });
+    const linked = visibilityMode.value === "linked";
+    const visibleAnchorIds = new Set(
+      nodes
+        .filter(node => anchorKinds.has(node.kind) && matchesById.get(node.id))
+        .map(node => node.id)
+    );
+    nodes.forEach(node => {
+      const matches = matchesById.get(node.id);
+      if (!linked || anchorKinds.has(node.kind)) {
+        node.visible = matches;
+        return;
+      }
+      if (!selectedKinds.has(node.kind)) {
+        node.visible = false;
+        return;
+      }
+      const owners = node.anchorIds || [];
+      node.visible = owners.length
+        ? owners.some(ownerId => visibleAnchorIds.has(ownerId))
+        : showUnlinked.checked && matches;
     });
     const shownNodes = visibleNodes().length;
     const shownEdges = visibleEdges().length;
-    counts.textContent = `${shownNodes} nodes · ${shownEdges} relations`;
+    counts.textContent = `${shownNodes} nodes · ${shownEdges} relations${linked ? ` · ${visibleAnchorIds.size} anchors` : ""}`;
     tagPickerSummary.textContent = tags.length
       ? `tags: ${tags.length} (${tagMatch.value})`
       : "tags: all";
     tagMatch.disabled = tags.length < 2;
     clearTags.disabled = !tags.length;
+    anchorPickerSummary.textContent = `anchors: ${anchorKinds.size}`;
+    showUnlinked.disabled = !linked;
+    showUnlinkedControl.classList.toggle("inactive", !linked);
     renderDetails();
     schedule();
   }
@@ -459,7 +612,7 @@ _SCRIPT = r"""
   }
 
   function buildControls() {
-    [...new Set(nodes.map(node => node.kind))].sort().forEach(kind => {
+    availableKinds.forEach(kind => {
       const label = document.createElement("label");
       label.className = "kind-toggle";
       label.style.setProperty("--kind-color", colors[kind] || "#a9b5c8");
@@ -475,6 +628,29 @@ _SCRIPT = r"""
       label.append(input, text);
       kindFilters.append(label);
     });
+
+    availableKinds.forEach(kind => {
+      const label = document.createElement("label");
+      label.className = "tag-option";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = anchorKinds.has(kind);
+      input.value = kind;
+      input.addEventListener("change", () => {
+        if (!input.checked && anchorKinds.size === 1 && anchorKinds.has(kind)) {
+          input.checked = true;
+          return;
+        }
+        if (input.checked) anchorKinds.add(kind); else anchorKinds.delete(kind);
+        computeAnchorAssociations();
+        applyFilters();
+      });
+      const text = document.createElement("span");
+      text.textContent = kind;
+      label.append(input, text);
+      anchorKindFilters.append(label);
+    });
+    anchorPicker.hidden = availableKinds.length === 0;
 
     const tagCounts = new Map();
     nodes.forEach(node => node.tags.forEach(tag => {
@@ -505,6 +681,7 @@ _SCRIPT = r"""
       .forEach(kind => addOption(relationFilter, kind, kind));
     [...new Set(nodes.map(node => node.status))].sort()
       .forEach(status => addOption(statusFilter, status, status));
+    computeAnchorAssociations();
   }
 
   function resize() {
@@ -599,17 +776,21 @@ _SCRIPT = r"""
     alpha *= .984;
   }
 
-  function drawArrow(source, target, color) {
+  function nodeRadius(node) {
+    const anchor = visibilityMode.value === "linked" && anchorKinds.has(node.kind);
+    return (anchor ? 15 : 10) + (node.id === selectedId ? 2 : 0);
+  }
+
+  function drawArrow(source, target, color, sourceRadius, targetRadius) {
     const dx = target.x - source.x;
     const dy = target.y - source.y;
     const distance = Math.max(1, Math.hypot(dx, dy));
     const ux = dx / distance;
     const uy = dy / distance;
-    const nodeRadius = 12;
-    const startX = source.x + ux * nodeRadius;
-    const startY = source.y + uy * nodeRadius;
-    const endX = target.x - ux * (nodeRadius + 3);
-    const endY = target.y - uy * (nodeRadius + 3);
+    const startX = source.x + ux * sourceRadius;
+    const startY = source.y + uy * sourceRadius;
+    const endX = target.x - ux * (targetRadius + 3);
+    const endY = target.y - uy * (targetRadius + 3);
     context.beginPath();
     context.moveTo(startX, startY);
     context.lineTo(endX, endY);
@@ -630,9 +811,17 @@ _SCRIPT = r"""
     context.clearRect(0, 0, width, height);
     const activeEdges = visibleEdges();
     activeEdges.forEach(edge => {
-      const source = screen(byId.get(edge.source));
-      const target = screen(byId.get(edge.target));
-      drawArrow(source, target, "rgba(139, 156, 184, .48)");
+      const sourceNode = byId.get(edge.source);
+      const targetNode = byId.get(edge.target);
+      const source = screen(sourceNode);
+      const target = screen(targetNode);
+      drawArrow(
+        source,
+        target,
+        "rgba(139, 156, 184, .48)",
+        nodeRadius(sourceNode),
+        nodeRadius(targetNode)
+      );
       if (showLabels.checked && scale > .42) {
         context.font = "11px ui-monospace, SFMono-Regular, Consolas, monospace";
         context.textAlign = "center";
@@ -643,7 +832,15 @@ _SCRIPT = r"""
     });
     visibleNodes().forEach(node => {
       const point = screen(node);
-      const radius = node.id === selectedId ? 14 : 11;
+      const radius = nodeRadius(node);
+      const anchor = visibilityMode.value === "linked" && anchorKinds.has(node.kind);
+      if (anchor) {
+        context.beginPath();
+        context.arc(point.x, point.y, radius + 4, 0, Math.PI * 2);
+        context.lineWidth = 1.5;
+        context.strokeStyle = "rgba(119, 189, 251, .8)";
+        context.stroke();
+      }
       context.beginPath();
       context.arc(point.x, point.y, radius, 0, Math.PI * 2);
       context.fillStyle = colors[node.kind] || "#a9b5c8";
@@ -652,7 +849,7 @@ _SCRIPT = r"""
       context.strokeStyle = node.id === data.focus ? "#f8d66d" : (node.id === selectedId ? "#ffffff" : "rgba(5, 10, 20, .8)");
       context.stroke();
       if (scale > .48 || node.id === selectedId || node.id === data.focus) {
-        context.font = node.id === selectedId
+        context.font = node.id === selectedId || anchor
           ? "600 12px Inter, system-ui, sans-serif"
           : "12px Inter, system-ui, sans-serif";
         context.textAlign = "center";
@@ -726,10 +923,39 @@ _SCRIPT = r"""
     appendText(details, "h2", node.title);
     appendText(details, "div", node.id, "node-id");
     [node.kind, node.status, ...node.tags].forEach(value => appendText(details, "span", value, "badge"));
+    const linked = visibilityMode.value === "linked";
+    const nodeIsAnchor = anchorKinds.has(node.kind);
+    if (linked) {
+      appendText(
+        details,
+        "span",
+        nodeIsAnchor ? "anchor" : (node.anchorIds.length ? "linked context" : "unlinked context"),
+        "badge role-badge"
+      );
+    }
     if (!node.visible) {
       appendText(details, "p", "Hidden by current filters · details remain available", "filter-note");
     }
     if (node.summary) appendText(details, "p", node.summary, "summary");
+
+    if (linked && !nodeIsAnchor) {
+      appendText(details, "h3", `Anchors (${node.anchorIds.length})`);
+      if (!node.anchorIds.length) {
+        appendText(details, "p", "No anchor association in the current graph.", "empty");
+      }
+      node.anchorIds.forEach(anchorId => {
+        const anchor = byId.get(anchorId);
+        const row = document.createElement("div");
+        row.className = "anchor-reference";
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = `${anchor.title}${anchor.visible ? "" : " (hidden)"}`;
+        button.addEventListener("click", () => selectNode(anchorId));
+        row.append(button);
+        appendText(row, "small", `${anchor.kind} · ${anchor.id}`);
+        details.append(row);
+      });
+    }
 
     const ignored = new Set(["format_version", "id", "kind", "title", "status", "summary", "tags", "aliases"]);
     const entries = Object.entries(node.details).filter(([key]) => !ignored.has(key));
@@ -825,6 +1051,8 @@ _SCRIPT = r"""
   }, { passive: false });
 
   search.addEventListener("input", applyFilters);
+  visibilityMode.addEventListener("change", applyFilters);
+  showUnlinked.addEventListener("change", applyFilters);
   relationFilter.addEventListener("change", applyFilters);
   statusFilter.addEventListener("change", applyFilters);
   tagMatch.addEventListener("change", applyFilters);
@@ -846,9 +1074,13 @@ _SCRIPT = r"""
   window.addEventListener("resize", resize);
   document.addEventListener("click", event => {
     if (tagPicker.open && !tagPicker.contains(event.target)) tagPicker.open = false;
+    if (anchorPicker.open && !anchorPicker.contains(event.target)) anchorPicker.open = false;
   });
   document.addEventListener("keydown", event => {
-    if (event.key === "Escape") tagPicker.open = false;
+    if (event.key === "Escape") {
+      tagPicker.open = false;
+      anchorPicker.open = false;
+    }
   });
 
   loadPositions();
@@ -888,6 +1120,20 @@ def render_graph_html(view: GraphView) -> str:
     </header>
     <div class="toolbar" aria-label="Graph controls">
       <input id="search" type="search" placeholder="Search title, ID, tag or alias" aria-label="Search nodes">
+      <select id="visibility-mode" aria-label="Context visibility mode">
+        <option value="independent">independent</option>
+        <option value="linked">linked context</option>
+      </select>
+      <details class="tag-picker anchor-picker" id="anchor-picker">
+        <summary id="anchor-picker-summary">anchors: 0</summary>
+        <div class="tag-menu">
+          <div class="tag-menu-header"><span>Anchor kinds</span></div>
+          <div id="anchor-kind-filters" aria-label="Anchor kind filters"></div>
+        </div>
+      </details>
+      <label class="linked-option inactive" id="show-unlinked-control">
+        <input id="show-unlinked" type="checkbox" checked> unlinked context
+      </label>
       <div id="kind-filters" aria-label="Node kind filters"></div>
       <details class="tag-picker" id="tag-picker">
         <summary id="tag-picker-summary">tags: all</summary>

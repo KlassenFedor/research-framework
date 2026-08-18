@@ -739,6 +739,13 @@ GraphSnapshot. HTML не зависит от CDN, не исполняет пол
 браузере и не меняют GraphViewModel. Selection карточки не зависит от Canvas
 visibility: скрытая фильтром Node остаётся доступной через relations.
 
+Linked context — также presentation-only projection. Настраиваемые Anchor kinds
+по умолчанию равны `hypothesis` и `claim`. После исключения Anchor и слабых
+`related_to` relations компоненты Context получают все граничащие Anchor. Такой
+линейный по `nodes + edges` расчёт поддерживает транзитивные исследовательские
+цепочки и не проходит через Anchor к другой группе. В linked mode фильтры
+выбирают Anchor, а Context отображается при видимости любого владельца.
+
 ## 10. Python API
 
 Публичный API должен быть небольшим и не раскрывать детали YAML-парсера или

@@ -8,11 +8,29 @@ import pytest
 
 from research_framework import Project, StorageError
 from research_framework.presentation.html_graph import (
+    GraphView,
+    GraphViewEdge,
+    GraphViewNode,
     build_graph_view,
+    compute_anchor_associations,
     render_graph_html,
     write_graph_html,
 )
 from tests.conftest import NODE_IDS, RELATION_IDS
+
+
+def view_node(node_id: str, kind: str) -> GraphViewNode:
+    return GraphViewNode(
+        id=node_id,
+        kind=kind,
+        status="active",
+        title=node_id,
+        summary=None,
+        tags=(),
+        aliases=(),
+        body="",
+        details={},
+    )
 
 
 @pytest.mark.contract
@@ -91,6 +109,71 @@ def test_focused_graph_view_contains_induced_neighborhood(example_project) -> No
 
 
 @pytest.mark.contract
+def test_anchor_associations_follow_context_chains_and_stop_at_anchors(
+    example_project,
+) -> None:
+    graph = Project.open(example_project).snapshot()
+    view = build_graph_view(graph, title="Example graph")
+
+    associations = compute_anchor_associations(
+        view,
+        anchor_kinds={"hypothesis", "claim"},
+    )
+
+    assert associations[NODE_IDS["hypothesis"]] == (NODE_IDS["hypothesis"],)
+    assert associations[NODE_IDS["claim"]] == (NODE_IDS["claim"],)
+    assert associations[NODE_IDS["assessment"]] == (NODE_IDS["hypothesis"],)
+    assert associations[NODE_IDS["run"]] == (NODE_IDS["hypothesis"],)
+    assert associations[NODE_IDS["artifact"]] == (NODE_IDS["hypothesis"],)
+    assert associations[NODE_IDS["source"]] == (NODE_IDS["hypothesis"],)
+    assert associations[NODE_IDS["question"]] == tuple(
+        sorted((NODE_IDS["hypothesis"], NODE_IDS["claim"]))
+    )
+
+    question_centered = compute_anchor_associations(
+        view,
+        anchor_kinds={"question"},
+    )
+    assert question_centered[NODE_IDS["assessment"]] == (NODE_IDS["question"],)
+
+
+@pytest.mark.contract
+def test_anchor_associations_support_multiple_anchors_unlinked_context_and_ignore_related_to() -> (
+    None
+):
+    view = GraphView(
+        title="Associations",
+        focus=None,
+        depth=None,
+        nodes=(
+            view_node("hyp-a", "hypothesis"),
+            view_node("clm-b", "claim"),
+            view_node("asm-shared", "assessment"),
+            view_node("evd-child", "evidence"),
+            view_node("src-weak", "source"),
+            view_node("art-unlinked", "artifact"),
+        ),
+        edges=(
+            GraphViewEdge("rel-a", "assesses", "asm-shared", "hyp-a", None),
+            GraphViewEdge("rel-b", "based_on", "asm-shared", "clm-b", None),
+            GraphViewEdge("rel-child", "derived_from", "evd-child", "asm-shared", None),
+            GraphViewEdge("rel-weak", "related_to", "src-weak", "hyp-a", None),
+        ),
+    )
+
+    associations = compute_anchor_associations(
+        view,
+        anchor_kinds={"hypothesis", "claim"},
+    )
+
+    expected = ("clm-b", "hyp-a")
+    assert associations["asm-shared"] == expected
+    assert associations["evd-child"] == expected
+    assert associations["src-weak"] == ()
+    assert associations["art-unlinked"] == ()
+
+
+@pytest.mark.contract
 def test_graph_view_rejects_depth_without_focus_and_negative_depth(
     example_project,
 ) -> None:
@@ -147,6 +230,11 @@ def test_html_contains_interactive_graph_controls(example_project) -> None:
         "tag-filters",
         "tag-match",
         "clear-tags",
+        "visibility-mode",
+        "anchor-picker",
+        "anchor-picker-summary",
+        "anchor-kind-filters",
+        "show-unlinked",
         "relation-filter",
         "fit",
         "reset-layout",
@@ -161,6 +249,13 @@ def test_html_contains_interactive_graph_controls(example_project) -> None:
     assert ".some(tag => node.tags.includes(tag))" in html
     assert ".every(tag => node.tags.includes(tag))" in html
     assert "tags: all" in html
+    assert 'value="independent"' in html
+    assert 'value="linked"' in html
+    assert 'kind === "hypothesis" || kind === "claim"' in html
+    assert "computeAnchorAssociations" in html
+    assert 'edge.kind === "related_to"' in html
+    assert "owners.some(ownerId => visibleAnchorIds.has(ownerId))" in html
+    assert "showUnlinked.checked && matches" in html
 
 
 @pytest.mark.contract

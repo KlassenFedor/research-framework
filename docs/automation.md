@@ -295,6 +295,11 @@ root, обязан заканчиваться на `.html` и не может н
 Команда только читает GraphSnapshot и атомарно записывает производный файл;
 исследовательские Markdown-документы не меняются.
 
+Сгенерированный HTML открывается в `independent` mode. Пользователь может
+переключить его в `linked context`, выбрать Anchor kinds (default:
+`hypothesis`, `claim`) и управлять unlinked Context. Это browser-only state: оно
+не меняет JSON response `graph render`, embedded GraphView или файлы проекта.
+
 ## 10. Validation и formatting в CI
 
 ```bash

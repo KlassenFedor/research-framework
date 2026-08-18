@@ -12,7 +12,7 @@
 | Domain | Все типы Node, Actor, enum, неизменяемость, ошибки |
 | Relations | Полная матрица source/kind/target, `supersedes`, `related_to` |
 | Graph | ID/alias/prefix, индексы, filters, neighbors, BFS, shortest path, JSON |
-| HTML graph | Full/local view, safe embedding, controls, tag any/all filters, details для скрытых Node |
+| HTML graph | Full/local view, safe embedding, tag filters, Anchor-компоненты, linked visibility, hidden details |
 | Markdown codec | Golden files, body round-trip, порядок полей, restricted YAML 1.2 |
 | JSON Schema | Draft 2020-12, package resources, все Node kinds, config, enums и negative cases |
 | Discovery | Поиск от вложенного пути, границы vault, symlinks, детерминизм |

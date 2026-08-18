@@ -3,6 +3,7 @@ from .html_graph import (
     GraphViewEdge,
     GraphViewNode,
     build_graph_view,
+    compute_anchor_associations,
     render_graph_html,
     write_graph_html,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "GraphViewEdge",
     "GraphViewNode",
     "build_graph_view",
+    "compute_anchor_associations",
     "render_edges",
     "render_graph_html",
     "render_neighborhood",

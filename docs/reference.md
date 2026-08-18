@@ -305,6 +305,34 @@ Canvas, но не запрещает чтение карточки. Список
 прошёл текущие фильтры. Ограничение `--focus/--depth` действует раньше, при
 построении GraphView, поэтому Node за пределами локального snapshot недоступны.
 
+#### Linked context visibility
+
+`independent` является режимом по умолчанию и сохраняет обычное поузловое
+применение фильтров. `linked context` разделяет текущий GraphView на Anchor и
+Context. Default Anchor kinds: `hypothesis`, `claim`; набор интерактивно
+настраивается и не записывается в проект.
+
+Пусть `F(n)` означает прохождение search/status/tag filters и включённый kind,
+`A(c)` — множество Anchor для Context Node, `V` — видимые Anchor. Тогда:
+
+```text
+visible(anchor) = F(anchor)
+visible(linked context) = kind_enabled(context) and any(A(context) ∩ V)
+visible(unlinked context) = show_unlinked and F(context)
+```
+
+Для ассоциаций direction relations игнорируется. После удаления Anchor и
+relations kind `related_to` оставшиеся Context-компоненты получают все Anchor,
+граничащие с компонентой. Поэтому транзитивные цепочки Run/Experiment и
+Source/Evidence сохраняют принадлежность, но путь не проходит через один Anchor
+к другому. Несколько Anchor используют OR-семантику: достаточно одного видимого.
+
+Relation kind filter применяется после node visibility и не участвует в
+ассоциациях. В linked-режиме Anchor отличаются размером и внешним кольцом;
+карточка Context показывает роль, список Anchor и их visible/hidden состояние.
+Checkbox `unlinked context` включён по умолчанию и недоступен в independent
+mode. Все вычисления остаются browser-only и не меняют GraphView или Markdown.
+
 ## 9. GraphSnapshot и чтение
 
 `Project.snapshot()` возвращает неизменяемый снимок. После мутации старый
