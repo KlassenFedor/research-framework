@@ -4,6 +4,37 @@
 проверки Git diff. Все команды изменяют только файлы проекта; `rf` никогда не
 делает `git add`, `commit`, `pull` или `push` самостоятельно.
 
+Полный перечень полей, relations и команд находится в
+[reference.md](reference.md). Строгий контракт для агентов и CI — в
+[automation.md](automation.md).
+
+## 0. Установка и выбор расположения
+
+Требуется Python 3.11+. Установить CLI из локального checkout удобно через
+`uv`:
+
+```bash
+uv tool install --editable /path/to/research-framework
+rf --help
+```
+
+После изменений исходного checkout editable-установка видит новый код. Для
+обычной не-editable установки уберите `--editable`.
+
+Research root можно держать отдельным репозиторием либо вложить в существующий.
+`rf init` не пишет в непустой каталог, поэтому для существующего проекта
+создайте дочернюю директорию и затем работайте из неё:
+
+```bash
+cd /path/to/existing-project
+rf init research-graph --title "Исследование проекта" --default-language ru
+cd research-graph
+```
+
+Команды ищут ближайший `research.yaml` от текущего каталога вверх. Из
+родительского каталога существующего проекта они вложенный research root не
+найдут; глобального `--project` в версии `0.1.0` нет.
+
 ## 1. Создание проекта
 
 ```bash
@@ -59,6 +90,40 @@ rf node create run \
   --instance-of exp-01K2M7K6R9JAFWQ3NRM8V4C1TX \
   --actor fedor
 ```
+
+### Как выглядит полный исследовательский цикл
+
+Фреймворк не навязывает порядок работы, но типичный граф развивается так:
+
+```text
+Question ← addresses — Hypothesis ← tests — Experiment ← instance_of — Run
+                              ↑                                  │
+                         supports                           produces
+                              │                                  ↓
+                         Evidence — derived_from → Run/Source/Artifact
+
+Hypothesis/Claim ← assesses — Assessment — based_on → Evidence/Claim
+                          Decision — based_on → Evidence/Assessment/Claim
+```
+
+Практический порядок:
+
+1. `question` фиксирует проверяемый вопрос и scope.
+2. `hypothesis` или `claim` формулирует утверждение; `addresses` связывает его
+   с вопросом.
+3. `experiment` описывает воспроизводимый protocol и через `tests` указывает,
+   что проверяется.
+4. `run` фиксирует конкретный запуск и ровно один `instance_of`.
+5. `source` и `artifact` регистрируют внешние материалы и результаты.
+6. `evidence` записывает наблюдение, `derived_from` — происхождение, а
+   `supports`/`challenges` — эпистемическое направление.
+7. `assessment` отдельно формулирует verdict, confidence и limitations.
+8. `decision` фиксирует практический outcome и через `based_on` указывает
+   основания.
+
+Это разделение важно: status Node (`draft`, `active`, `closed`, `archived`) —
+состояние работы, а не степень истинности. «Подтверждено» следует хранить в
+Assessment.
 
 ## 3. Просмотр графа
 
@@ -193,3 +258,48 @@ project_contract = project_schema()
 Schema полезны для редакторов и внешних инструментов. Каноническую проверку
 целого проекта выполняет `rf validate`, потому что она дополнительно проверяет
 межфайловые ссылки и правила графа.
+
+## 9. Ручное редактирование файлов
+
+Markdown-файлы остаются обычными текстовыми документами. Можно править body и
+front matter редактором, но соблюдайте несколько правил:
+
+- не меняйте `id`, `kind`, `created_at`, `created_by` и relation IDs;
+- не создавайте backlinks вручную — incoming relations вычисляются;
+- используйте только JSON-совместимые YAML values;
+- не используйте YAML anchors, aliases, merge keys или custom tags;
+- timestamps указывайте с timezone;
+- после правки всегда запускайте `rf validate`.
+
+`rf format` канонизирует только front matter. Markdown body и `PROJECT.md`
+сохраняются byte-for-byte. Имя файла содержит удобный slug, но ссылкой служит
+ID или alias; после изменения title переименование файла не обязательно.
+
+## 10. Диагностика проблем
+
+| Симптом | Причина и действие |
+|---|---|
+| `project_not_found` | Перейдите в research root или его вложенный каталог |
+| reference не найден | Проверьте полный ID/alias; отсутствие даёт exit `4` |
+| reference ambiguous | Используйте более длинный ID prefix или полный ID |
+| revision conflict | Снова выполните `node show --json`, объедините правки |
+| validation failed | Исправьте перечисленные diagnostics; файлы мутацией не изменены |
+| formatting required | Выполните `rf format`, проверьте diff |
+| unsupported format version | Не записывайте проект старой версией CLI |
+
+Коды завершения: `0` — успех, `1` — format drift/framework error, `2` —
+аргументы, `3` — validation, `4` — not found/ambiguous, `5` — revision
+conflict, `6` — format version. Warnings выводятся в stderr, но сохраняют exit
+`0`.
+
+Если команда неожиданно завершилась, сначала выполните:
+
+```bash
+pwd
+rf validate
+git status --short
+git diff
+```
+
+Мутации атомарны и предварительно валидируются. Однако Git остаётся последней
+точкой восстановления и аудита, поэтому просматривайте diff до commit.

@@ -1003,6 +1003,13 @@ JSON input для `node create` может включать те же начал
 - логи отправляются в stderr;
 - timestamps и enums не локализуются.
 
+JSON input использует закрытые строгие envelopes: неизвестные поля запрещены,
+числа и boolean не приводятся к строкам, одна строка не приводится к массиву,
+а необязательное значение следует опустить вместо передачи `null`. Ошибка
+формы запроса даёт `invalid_arguments` и exit code `2` до файловой записи;
+ошибка предметной или graph validation — exit code `3`, также без частичной
+мутации. Точный контракт приведён в [automation.md](automation.md).
+
 Успешные mutation-команды передают warnings из того же candidate validation в
 верхнеуровневом массиве `warnings`. В human-oriented режиме те же warnings
 печатаются в stderr и не меняют exit code `0`.
