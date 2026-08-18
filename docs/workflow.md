@@ -155,6 +155,7 @@ progress bar. Если вывод направлен в лог, включите
 
 ```bash
 rf --progress graph render
+rf --progress validate --json >validation.json  # progress остаётся в stderr
 ```
 
 Результат по умолчанию — `research-graph.html` в каталоге рядом с
@@ -269,6 +270,7 @@ rf node show hyp-01K2M7K6 --json > shown.json
   "patch": {
     "summary": "Проверено повторным benchmark"
   },
+  "body": "# Итог\n\nРезультат повторно проверен.\n",
   "expected_revision": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "actor": {
     "kind": "human",
@@ -279,10 +281,16 @@ rf node show hyp-01K2M7K6 --json > shown.json
 
 ```bash
 rf node update hyp-01K2M7K6 --from-json update.json
+rf node edit hyp-01K2M7K6 --actor fedor
 rf node archive hyp-01K2M7K6 \
   --expected-revision "<revision from the latest node show>" \
   --actor fedor
 ```
+
+`body` располагается рядом с `patch`, а не внутри YAML metadata. Можно передать
+только `body` или только `patch`; если присутствуют оба, они сохраняются одной
+атомарной операцией. `node edit` открывает `$EDITOR` с текущим телом и сам
+защищает интервал редактирования revision check.
 
 Если файл изменился после чтения revision, команда возвращает exit code `5` и
 оставляет внешнюю правку без изменений. Архивирование меняет status, но не
@@ -355,8 +363,10 @@ Schema полезны для редакторов и внешних инстру
 
 ## 9. Ручное редактирование файлов
 
-Markdown-файлы остаются обычными текстовыми документами. Можно править body и
-front matter редактором, но соблюдайте несколько правил:
+Markdown-файлы остаются обычными текстовыми документами. Для body предпочтительна
+команда `rf node edit REF --actor ID`: она обновляет audit fields, проверяет
+revision и выполняет atomic replace. При прямой правке body или front matter
+соблюдайте несколько правил:
 
 - не меняйте `id`, `kind`, `created_at`, `created_by` и relation IDs;
 - не создавайте backlinks вручную — incoming relations вычисляются;

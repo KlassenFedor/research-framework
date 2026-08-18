@@ -13,15 +13,16 @@
 | Relations | Полная матрица source/kind/target, `supersedes`, `related_to` |
 | Graph | ID/alias/prefix, индексы, filters, neighbors, BFS, linear-memory shortest path, JSON, глубокие cycles без recursion |
 | HTML graph | Full/local view, safe embedding, tag filters, Anchor-компоненты, linked visibility, hidden details, bounded layout и progress |
-| Markdown codec | Golden files, body round-trip, порядок полей, restricted YAML 1.2 |
+| Markdown codec | Golden files, body round-trip, header/body offset, порядок полей, restricted YAML 1.2 |
 | JSON Schema | Draft 2020-12, package resources, все Node kinds, config, enums и negative cases |
 | Discovery | Поиск от вложенного пути, границы vault, symlinks, детерминизм |
 | Validation | Syntax, structural, referential, semantic и graph diagnostics |
 | Storage | Candidate prevalidation, atomic write/rollback, revision conflict, локальность diff, защита путей |
-| Load/mutation performance | Один read/decode на Node при open; нет повторного vault scan при mutation; copy-on-write сохраняет старые snapshots |
+| Load/mutation performance | Cold open читает Node один раз; warm open не декодирует неизменившийся Markdown; body ленив; mutation не сканирует vault; copy-on-write сохраняет старые snapshots |
+| Persistent index | Zero-decode reuse, one-file invalidation, checksum/version rebuild, явный validate обходит кеш |
 | Formatting | Read-only check, canonical front matter, byte-exact body, idempotence, rollback, concurrent edits |
-| Python API | Init/open, atomic mutations, operation diagnostics, snapshots |
-| CLI | Human/JSON warnings, progress, таблицы/графы, HTML render, `$EDITOR`, initial relations, stdin и exit codes |
+| Python API | Init/open, atomic metadata/body mutations, operation diagnostics, snapshots |
+| CLI | Human/JSON warnings, stderr progress, таблицы/графы, HTML render, `$EDITOR`, body update, initial relations, stdin и exit codes |
 | Git acceptance | Реальные diff для create/update/link/remove/archive/format и локальность файлов |
 | End-to-end | `init → create → link → reopen → traverse → validate → export` |
 

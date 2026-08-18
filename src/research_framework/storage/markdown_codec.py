@@ -25,32 +25,56 @@ class DecodedMarkdown:
         return replace(self, metadata=metadata)
 
 
+@dataclass(frozen=True, slots=True)
+class MarkdownHeader:
+    metadata: Mapping[str, Any]
+    body_offset: int
+    path: Path
+
+
+def _next_line(text: str, start: int) -> tuple[str, int]:
+    """Return one line without its terminator and the following offset."""
+
+    newline = text.find("\n", start)
+    carriage = text.find("\r", start)
+    endings = tuple(index for index in (newline, carriage) if index >= 0)
+    if not endings:
+        return text[start:], len(text)
+    end = min(endings)
+    following = end + 1
+    if text[end] == "\r" and following < len(text) and text[following] == "\n":
+        following += 1
+    return text[start:end], following
+
+
 class MarkdownCodec:
-    def decode(self, text: str, *, path: Path) -> DecodedMarkdown:
-        lines = text.splitlines(keepends=True)
-        if not lines or lines[0].rstrip("\r\n") != "---":
+    def decode_header(self, text: str, *, path: Path) -> MarkdownHeader:
+        first_line, cursor = _next_line(text, 0)
+        if first_line != "---":
             raise MarkdownCodecError(
                 "missing_front_matter",
                 path,
                 "Markdown node must start with YAML front matter",
             )
 
-        closing_index = next(
-            (
-                index
-                for index, line in enumerate(lines[1:], start=1)
-                if line.rstrip("\r\n") == "---"
-            ),
-            None,
-        )
-        if closing_index is None:
+        front_matter_start = cursor
+        closing_start: int | None = None
+        body_offset: int | None = None
+        while cursor < len(text):
+            line_start = cursor
+            line, cursor = _next_line(text, cursor)
+            if line == "---":
+                closing_start = line_start
+                body_offset = cursor
+                break
+        if closing_start is None or body_offset is None:
             raise MarkdownCodecError(
                 "unclosed_front_matter",
                 path,
                 "YAML front matter has no closing delimiter",
             )
 
-        front_matter = "".join(lines[1:closing_index])
+        front_matter = text[front_matter_start:closing_start]
         if any(marker in front_matter for marker in ("<<<<<<<", "=======", ">>>>>>>")):
             raise MarkdownCodecError(
                 "git_conflict_marker",
@@ -63,9 +87,13 @@ class MarkdownCodec:
         except RestrictedYamlError as error:
             raise MarkdownCodecError(error.code, path, str(error)) from error
 
+        return MarkdownHeader(metadata=metadata, body_offset=body_offset, path=path)
+
+    def decode(self, text: str, *, path: Path) -> DecodedMarkdown:
+        header = self.decode_header(text, path=path)
         return DecodedMarkdown(
-            metadata=metadata,
-            body="".join(lines[closing_index + 1 :]),
+            metadata=header.metadata,
+            body=text[header.body_offset :],
             path=path,
         )
 

@@ -13,9 +13,11 @@ Research Framework ведёт исследование как типизиров
 - YAML front matter — структурированные метаданные;
 - Markdown body — свободный текст для человека;
 - исходящие relations находятся в source-файле;
-- входящие связи и индексы вычисляются при загрузке;
+- входящие связи и in-memory индексы вычисляются при загрузке;
 - Git хранит историю, ветки и merge conflicts;
-- постоянной БД, обязательного кеша и скрытого canonical state нет.
+- постоянной БД и скрытого canonical state нет;
+- удаляемый `.research-cache/index-v1.json` ускоряет повторное открытие, но не
+  заменяет и не изменяет Markdown/YAML.
 
 JSON не заменяет файлы. Он используется для CLI automation, экспорта графа и
 JSON Schema. YAML ограничен JSON-совместимыми значениями.
@@ -224,7 +226,8 @@ Backlinks не записываются: `incoming()` вычисляется и�
 | `rf node create KIND ...` | создать Node |
 | `rf node show REF [--json]` | показать Node, body и revision |
 | `rf node list [--kind K] [--status S] [--tag T]` | фильтровать Nodes |
-| `rf node update REF --from-json FILE` | изменить разрешённые поля с revision |
+| `rf node update REF --from-json FILE` | атомарно изменить metadata и/или body с revision |
+| `rf node edit REF --actor ID` | изменить body через `$EDITOR` с revision check |
 | `rf node archive REF --expected-revision REV --actor ID` | архивировать Node |
 
 Общие create-флаги: `--title`, `--summary`, повторяемые `--tag` и `--alias`,
@@ -266,8 +269,9 @@ rf --no-progress graph render    # полностью отключить
 ```
 
 `--progress` и `--no-progress` являются корневыми опциями и ставятся перед
-командой. Progress никогда не выводится для `--json` и raw `graph export`,
-поэтому машинный stdout/stderr-контракт остаётся стабильным.
+командой. Для `--json` и raw `graph export` автоматический progress отключён.
+Явный `--progress` разрешён: индикатор идёт только в `stderr`, а JSON в `stdout`
+остаётся одним корректным document.
 
 ### `graph render`
 
@@ -393,6 +397,12 @@ Revision — SHA-256 исходных байтов Node-файла, вычисл
 записываемый во front matter. Update и archive требуют expected revision. При
 внешнем изменении возникает `RevisionConflict`, поэтому чужая правка не
 перезаписывается.
+
+`Project.update_node(..., body=...)` держит Markdown body отдельно от metadata:
+`None` означает «не менять», а пустая строка очищает тело. Metadata patch и body
+сохраняются одной atomic replace; `updated_at`/`updated_by` обновляются и для
+body-only правки. `rf node edit` запоминает revision перед запуском `$EDITOR`,
+поэтому конкурентная запись во время редактирования не будет перезаписана.
 
 Записи выполняются через временный файл, `fsync` и atomic replace. Новый
 immutable snapshot публикуется из только что сериализованных bytes. Ранее
@@ -523,10 +533,13 @@ graph-правила проверяет `rf validate`, а не JSON Schema.
 - физическое удаление Node;
 - автоматические commit/pull/push и разрешение конфликтов;
 - миграции между format versions;
-- постоянная БД, полнотекстовый индекс и web UI;
+- постоянная БД, полнотекстовый поисковый индекс и web UI;
 - глобальный CLI-флаг выбора project root;
 - инициализация непосредственно в непустой директории.
 
-Project открывается полным сканированием vault. Это предсказуемо и достаточно
-для MVP. Обычные мутации повторно vault не сканируют; производный удаляемый
-индекс может быть добавлен позднее для ускорения открытия.
+Первое открытие сканирует vault и создаёт производный индекс metadata. При
+повторном открытии неизменившиеся файлы определяются по path, size, `mtime_ns`,
+`ctime_ns` и inode; их YAML повторно не декодируется. Markdown body загружается
+по первому обращению и проверяется против сохранённой SHA-256 revision. Явный
+`rf validate` всегда читает источники, не доверяя кешу. Удаление или повреждение
+`.research-cache` приводит только к безопасному холодному rebuild.

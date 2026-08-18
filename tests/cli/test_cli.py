@@ -83,8 +83,19 @@ def test_progress_can_be_forced_for_human_commands(example_project: Path) -> Non
 
 @pytest.mark.contract
 @pytest.mark.cli
-def test_progress_never_pollutes_json_mode(example_project: Path) -> None:
+def test_explicit_progress_uses_stderr_in_json_mode(example_project: Path) -> None:
     result = run_cli(example_project, "--progress", "validate", "--json")
+
+    assert result.returncode == 0
+    assert "Loading research nodes" in result.stderr
+    assert "100.0%" in result.stderr
+    assert json_stdout(result)["ok"] is True
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_json_mode_keeps_progress_disabled_by_default(example_project: Path) -> None:
+    result = run_cli(example_project, "validate", "--json")
 
     assert result.returncode == 0
     assert result.stderr == ""
@@ -93,11 +104,14 @@ def test_progress_never_pollutes_json_mode(example_project: Path) -> None:
 
 @pytest.mark.contract
 @pytest.mark.cli
-def test_progress_never_pollutes_raw_graph_export(example_project: Path) -> None:
+def test_explicit_progress_uses_stderr_for_raw_graph_export(
+    example_project: Path,
+) -> None:
     result = run_cli(example_project, "--progress", "graph", "export")
 
     assert result.returncode == 0
-    assert result.stderr == ""
+    assert "Loading research nodes" in result.stderr
+    assert "Serializing graph" in result.stderr
     assert len(json.loads(result.stdout)["nodes"]) == 11
 
 
@@ -374,6 +388,65 @@ def test_node_update_json_rejects_invalid_envelope_without_writing(
     assert result.returncode == 2
     assert payload["error"]["code"] == "invalid_arguments"
     assert message in payload["error"]["message"]
+    assert claim.read_bytes() == before
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_node_update_json_can_replace_body_without_metadata_patch(
+    example_project: Path,
+) -> None:
+    shown = run_cli(example_project, "node", "show", NODE_IDS["claim"], "--json")
+    request = {
+        "body": "\n# Revised claim\n\nUpdated by an automation client.\n",
+        "expected_revision": json_stdout(shown)["data"]["revision"],
+        "actor": {"kind": "agent", "id": "writer", "run_id": "edit-42"},
+    }
+
+    result = run_cli(
+        example_project,
+        "node",
+        "update",
+        NODE_IDS["claim"],
+        "--from-json",
+        "-",
+        "--json",
+        input_text=json.dumps(request),
+    )
+
+    payload = json_stdout(result)
+    assert result.returncode == 0
+    assert payload["data"]["body"] == request["body"]
+    assert payload["data"]["updated_by"] == request["actor"]
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_node_update_json_rejects_non_string_body_without_writing(
+    example_project: Path,
+) -> None:
+    claim = next((example_project / "research" / "claims").glob("*.md"))
+    before = claim.read_bytes()
+    shown = run_cli(example_project, "node", "show", NODE_IDS["claim"], "--json")
+    request = {
+        "body": None,
+        "expected_revision": json_stdout(shown)["data"]["revision"],
+        "actor": {"kind": "human", "id": "reviewer"},
+    }
+
+    result = run_cli(
+        example_project,
+        "node",
+        "update",
+        NODE_IDS["claim"],
+        "--from-json",
+        "-",
+        "--json",
+        input_text=json.dumps(request),
+    )
+
+    assert result.returncode == 2
+    assert "body must be a string" in json_stdout(result)["error"]["message"]
     assert claim.read_bytes() == before
 
 
@@ -1418,6 +1491,37 @@ def test_node_create_edit_opens_configured_editor_and_saves_body(
     assert created.read_text(encoding="utf-8").endswith(
         "# Edited body\n\nWritten in the configured editor.\n"
     )
+
+
+@pytest.mark.contract
+@pytest.mark.cli
+def test_node_edit_prefills_editor_and_atomically_saves_body(
+    example_project: Path,
+    tmp_path: Path,
+) -> None:
+    editor = tmp_path / "editor.py"
+    editor.write_text(
+        "import pathlib, sys\n"
+        "path = pathlib.Path(sys.argv[1])\n"
+        "original = path.read_text(encoding='utf-8')\n"
+        "assert 'This claim records a relevant trade-off' in original\n"
+        "path.write_text(original + '\\nEdited interactively.\\n', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        example_project,
+        "node",
+        "edit",
+        NODE_IDS["claim"],
+        "--actor",
+        "reviewer",
+        environment_overrides={"EDITOR": f"{sys.executable} {editor}"},
+    )
+
+    assert result.returncode == 0
+    shown = run_cli(example_project, "node", "show", NODE_IDS["claim"], "--json")
+    assert json_stdout(shown)["data"]["body"].endswith("Edited interactively.\n")
 
 
 @pytest.mark.contract

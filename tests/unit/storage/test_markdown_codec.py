@@ -139,6 +139,18 @@ def test_metadata_update_preserves_body_exactly(codec: MarkdownCodec) -> None:
     assert round_trip.metadata["summary"] == "New summary"
 
 
+def test_decode_header_reports_body_offset_without_materializing_body(
+    codec: MarkdownCodec,
+) -> None:
+    body = "\n# Большое тело\n\nСвободный Markdown.\n"
+    text = "---\r\ntitle: Header only\r\n---\r\n" + body
+
+    header = codec.decode_header(text, path=Path("node.md"))
+
+    assert header.metadata == {"title": "Header only"}
+    assert text[header.body_offset :] == body
+
+
 @pytest.mark.contract
 def test_encoder_uses_stable_top_level_field_order(codec: MarkdownCodec) -> None:
     metadata = node_metadata("question")

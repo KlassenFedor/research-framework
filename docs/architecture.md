@@ -701,7 +701,9 @@ src/research_framework/
 class Repository(Protocol):
     def load(self) -> GraphSnapshot: ...
     def create_node(self, draft: NodeDraft) -> Node: ...
-    def update_node(self, node_id: str, patch: NodePatch) -> Node: ...
+    def update_node(
+        self, node_id: str, patch: NodePatch, body: str | None = None
+    ) -> Node: ...
     def archive_node(self, node_id: str) -> Node: ...
     def add_edge(self, draft: EdgeDraft) -> Edge: ...
     def remove_edge(self, edge_id: str) -> None: ...
@@ -854,13 +856,17 @@ node = project.snapshot().get_node(hypothesis.id)
 project.update_node(
     node.id,
     patch={"summary": "Обновлённое summary"},
+    body="# Вывод\n\nОбновлённое подробное описание.\n",
     expected_revision=node.revision,
     actor=Actor.human("fedor"),
 )
 ```
 
-Если файл изменился после чтения, операция завершается `RevisionConflict`, а не
-перезаписывает чужую работу. Это особенно важно для нескольких агентов.
+`body` передаётся отдельно от YAML metadata: `None` сохраняет прежнее тело,
+пустая строка очищает его. Patch и body сериализуются одной атомарной операцией
+и вместе обновляют audit fields. Если файл изменился после чтения, операция
+завершается `RevisionConflict`, а не перезаписывает чужую работу. Это особенно
+важно для нескольких агентов.
 
 Перед записью `create_node`, `update_node`, `add_edge` и `remove_edge` строят
 полные метаданные будущего source-документа. Structural rules проверяются на
@@ -928,6 +934,7 @@ rf node create KIND
 rf node show ID
 rf node list
 rf node update ID
+rf node edit ID
 rf node archive ID
 
 rf link add SOURCE KIND TARGET
@@ -981,12 +988,14 @@ rf format --check
 
 - выводит компактные таблицы и деревья;
 - пишет warnings в stderr;
-- по явному `--edit` открывает `$EDITOR` для Markdown body;
+- `node create --edit` и `node edit` открывают `$EDITOR` для Markdown body;
 - также принимает Markdown body через `--body` или `--body-file`;
 - никогда не выполняет Git-команды автоматически.
 
 Флаги `--body`, `--body-file` и `--edit` взаимоисключающие. Ошибка запуска или
-ненулевой exit code редактора отменяют создание узла до файловой мутации.
+ненулевой exit code редактора отменяют операцию до файловой мутации. При
+`node edit` редактор получает текущее тело, а revision фиксируется до его
+запуска.
 
 ### 11.3. Режим для программ и агентов
 
@@ -1030,6 +1039,9 @@ JSON input для `node create` может включать те же начал
 - diagnostics и результат имеют стабильную схему;
 - логи отправляются в stderr;
 - timestamps и enums не локализуются.
+
+Автоматический progress в этом режиме отключён. Явный корневой `--progress`
+разрешён и пишет только в stderr, не добавляя данные к JSON document в stdout.
 
 JSON input использует закрытые строгие envelopes: неизвестные поля запрещены,
 числа и boolean не приводятся к строкам, одна строка не приводится к массиву,
@@ -1184,14 +1196,42 @@ suggestion: Create the target or remove the relation
 
 ## 14. Производительность без БД
 
-Открытие Project и явный `validate` сканируют vault целиком. `Project.open`
-читает и декодирует каждый Node ровно один раз: те же decoded documents сначала
-проходят validation, затем превращаются в GraphSnapshot. Restricted YAML также
-проверяет запрещённые aliases/tags в одном parse-проходе и не использует
-C-backed loader. Стоимость:
+Холодное открытие Project и явный `validate` сканируют vault целиком. При
+холодном открытии каждый Node читается один раз, но в snapshot сохраняются
+только metadata, relation indexes, revision и ленивый body loader. Restricted
+YAML проверяет запрещённые aliases/tags в одном parse-проходе и не использует
+C-backed loader.
+
+После успешного parse-прохода `Project.open` атомарно создаёт производный индекс:
 
 ```text
-загрузка: O(число файлов + размер front matter)
+.research-cache/index-v1.json
+```
+
+Он содержит нормализованные metadata, relations, SHA-256 revision, body offset
+и fingerprint `(path, size, mtime_ns, ctime_ns, inode)`. При тёплом открытии
+фреймворк делает discovery/stat, повторно декодирует только изменившиеся файлы и
+выполняет graph validation над объединёнными metadata в памяти. `rf validate`
+намеренно не использует индекс и всегда проверяет исходные Markdown.
+
+`mtime_ns` — время изменения содержимого файла с наносекундной точностью; его
+некоторые инструменты умеют сохранять или выставлять. `ctime_ns` — время
+изменения inode/его метаданных, которое ОС обновляет при записи и atomic replace
+и обычно не позволяет произвольно вернуть назад. `inode` дополнительно замечает
+замену файла другим объектом при совпавших размере и timestamps.
+
+JSON-индекс не является canonical state: он закрыт для пользовательской записи,
+содержит checksum, версию формата и signature конфигурации. Повреждение,
+несовместимая версия, изменение конфигурации или удаление кеша приводят к
+холодному rebuild. Ошибка чтения или записи кеша не должна мешать чтению
+проекта; cache directory сам игнорирует своё содержимое для Git.
+
+Стоимость:
+
+```text
+холодная загрузка: O(число файлов + объём файлов + размер front matter)
+тёплая загрузка: O(число файлов для stat + V + E)
+доступ к первому body: O(размер выбранного файла), далее O(1)
 построение adjacency: O(V + E)
 neighbors: O(степень узла)
 traverse: O(посещённые V + E)
@@ -1202,8 +1242,8 @@ find_path: O(посещённые V + E), восстановление по pred
 
 Полная проверка cycles использует iterative DFS и не зависит от Python
 recursion limit. Потенциально долгие application-операции принимают typed
-`ProgressEvent` callback; CLI отображает его как progress bar только в
-human-mode/TTY.
+`ProgressEvent` callback. CLI отображает его автоматически в human-mode/TTY;
+явный `--progress` также разрешает stderr-индикатор для JSON/raw output.
 
 Mutation path не выполняет повторный file scan, full validation или reload.
 Project использует copy-on-write snapshot: полная неглубокая копия индексов
@@ -1215,24 +1255,11 @@ Project использует copy-on-write snapshot: полная неглубо
 создать новую session через `Project.open()`. Revision изменяемого source
 проверяется непосредственно перед atomic write независимо от этого.
 
-Markdown body можно загружать лениво: сначала читать metadata и offsets, а body
-открывать только для `show` или export. Это даст приемлемую работу на проектах
-с тысячами узлов без дополнительного постоянного состояния.
-
-Постоянный индекс для ускорения самого открытия следует добавлять после
-измерений. Возможный будущий индекс:
-
-```text
-.research-cache/index.sqlite
-```
-
-Он обязан:
-
-- находиться в `.gitignore`;
-- содержать hash/indexed revision каждого файла;
-- автоматически обновляться или пересобираться;
-- не принимать пользовательские записи напрямую;
-- не менять результат запросов по сравнению с чистым file scan.
+Markdown body загружается при первом обращении. Перед возвратом текста loader
+повторно вычисляет SHA-256 файла; если revision изменилась после создания
+snapshot, возникает `RevisionConflict`, поэтому metadata старого snapshot
+никогда не смешиваются с новым body. Успешно загруженное тело мемоизируется в
+этом Node.
 
 ## 15. Версионирование формата
 

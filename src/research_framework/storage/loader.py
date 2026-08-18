@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from research_framework.domain.actors import Actor
 from research_framework.domain.enums import ActorKind, EdgeKind, NodeKind, NodeStatus
+from research_framework.domain.errors import RevisionConflict, StorageError
 from research_framework.domain.graph import Edge, GraphSnapshot, Node, freeze_mapping
 
 from .discovery import DiscoveredProject, discover_node_files
@@ -43,8 +46,44 @@ def parse_datetime(value: str) -> datetime:
     return datetime.fromisoformat(value)
 
 
+@dataclass(frozen=True, slots=True)
+class LazyMarkdownBody:
+    path: Path
+    body_offset: int
+    revision: str
+    node_id: str
+
+    def __call__(self) -> str:
+        try:
+            raw = self.path.read_bytes()
+        except OSError as error:
+            raise StorageError(f"cannot read node body: {self.path}") from error
+        actual_revision = hashlib.sha256(raw).hexdigest()
+        if actual_revision != self.revision:
+            raise RevisionConflict(self.node_id, self.revision, actual_revision)
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise StorageError(f"node body is not valid UTF-8: {self.path}") from error
+        return text[self.body_offset :]
+
+
 def parse_node(document: DecodedMarkdown, *, revision: str) -> Node:
-    metadata = document.metadata
+    return parse_node_metadata(
+        document.metadata,
+        path=document.path,
+        revision=revision,
+        body=document.body,
+    )
+
+
+def parse_node_metadata(
+    metadata: Mapping[str, Any],
+    *,
+    path: Path,
+    revision: str,
+    body: str | LazyMarkdownBody,
+) -> Node:
     data = {key: value for key, value in metadata.items() if key not in COMMON_FIELDS}
     return Node(
         format_version=metadata["format_version"],
@@ -60,8 +99,8 @@ def parse_node(document: DecodedMarkdown, *, revision: str) -> Node:
         updated_at=parse_datetime(metadata["updated_at"]),
         updated_by=parse_actor(metadata["updated_by"]),
         extensions=freeze_mapping(metadata.get("extensions", {})),
-        body=document.body,
-        path=document.path,
+        _body=body,
+        path=path,
         revision=revision,
         data=freeze_mapping(data),
     )
@@ -92,10 +131,18 @@ def load_documents(
     edges: list[Edge] = []
     for path in discover_node_files(project):
         raw = path.read_bytes()
-        document = codec.decode(raw.decode("utf-8"), path=path)
-        node = parse_node(document, revision=hashlib.sha256(raw).hexdigest())
+        text = raw.decode("utf-8")
+        header = codec.decode_header(text, path=path)
+        revision = hashlib.sha256(raw).hexdigest()
+        node_id = str(header.metadata.get("id", "unknown"))
+        node = parse_node_metadata(
+            header.metadata,
+            path=path,
+            revision=revision,
+            body=LazyMarkdownBody(path, header.body_offset, revision, node_id),
+        )
         nodes.append(node)
-        edges.extend(parse_edges(node, document.metadata))
+        edges.extend(parse_edges(node, header.metadata))
     return tuple(nodes), tuple(edges)
 
 

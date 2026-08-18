@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from research_framework import ProgressEvent, Project
+from research_framework import ProgressEvent, Project, RevisionConflict
+from tests.conftest import NODE_IDS
 
 
 @pytest.mark.contract
@@ -38,6 +39,50 @@ def test_project_open_reads_and_decodes_each_node_only_once(
 
     assert len(project.snapshot().list_nodes()) == 11
     assert markdown_reads == {"bytes": 11, "text": 0}
+
+
+@pytest.mark.contract
+@pytest.mark.integration
+def test_snapshot_body_is_loaded_once_on_first_access(
+    example_project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = Project.open(example_project)
+    node = project.snapshot().get_node(NODE_IDS["claim"])
+    original_read_bytes = Path.read_bytes
+    reads: list[Path] = []
+
+    def counted_read_bytes(path: Path) -> bytes:
+        if path.suffix == ".md":
+            reads.append(path)
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
+
+    assert "body" not in node.to_dict()
+    assert project.snapshot().list_nodes(kind="claim") == (node,)
+    assert reads == []
+
+    assert "Context cost" in node.body
+    assert reads == [node.path]
+    assert "Context cost" in node.body
+    assert reads == [node.path]
+
+
+@pytest.mark.contract
+@pytest.mark.integration
+def test_lazy_body_never_mixes_a_stale_snapshot_with_new_file_content(
+    example_project: Path,
+) -> None:
+    project = Project.open(example_project)
+    node = project.snapshot().get_node(NODE_IDS["claim"])
+    node.path.write_text(
+        node.path.read_text(encoding="utf-8") + "\nExternal edit.\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RevisionConflict):
+        _ = node.body
 
 
 @pytest.mark.contract

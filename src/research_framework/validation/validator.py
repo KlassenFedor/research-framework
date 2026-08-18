@@ -24,9 +24,18 @@ from research_framework.storage.discovery import (
     discover_node_files,
     discover_project,
 )
-from research_framework.storage.loader import parse_edges, parse_node
+from research_framework.storage.index_cache import (
+    CachedNodeRecord,
+    FileFingerprint,
+    load_index,
+    write_index,
+)
+from research_framework.storage.loader import (
+    LazyMarkdownBody,
+    parse_edges,
+    parse_node_metadata,
+)
 from research_framework.storage.markdown_codec import (
-    DecodedMarkdown,
     MarkdownCodec,
     MarkdownCodecError,
 )
@@ -106,7 +115,7 @@ _REQUIRED_SPECIAL: dict[str, set[str]] = {
 class _Record:
     path: Path
     metadata: dict[str, Any]
-    document: DecodedMarkdown | None = None
+    body_offset: int | None = None
     revision: str | None = None
 
     @property
@@ -1131,7 +1140,7 @@ def _load_records(
     diagnostics: list[Diagnostic],
     *,
     exclude_path: Path | None = None,
-    retain_documents: bool = False,
+    retain_snapshot_data: bool = False,
     progress: ProgressCallback | None = None,
 ) -> list[_Record]:
     codec = MarkdownCodec()
@@ -1144,6 +1153,10 @@ def _load_records(
         message="Discovering research nodes",
     )
     node_paths = discover_node_files(project)
+    relative_paths = {path.relative_to(project.root) for path in node_paths}
+    cached_records = load_index(project) if retain_snapshot_data else {}
+    cache_dirty = retain_snapshot_data and set(cached_records) != relative_paths
+    refreshed_cache: list[CachedNodeRecord] = []
     notify_progress(
         progress,
         phase="discovering",
@@ -1170,8 +1183,7 @@ def _load_records(
             )
             continue
         try:
-            raw = node_path.read_bytes()
-            text = raw.decode("utf-8")
+            fingerprint = FileFingerprint.from_path(node_path)
         except (OSError, UnicodeError) as error:
             diagnostics.append(
                 _diagnostic(
@@ -1188,26 +1200,80 @@ def _load_records(
                 message="Loading research nodes",
             )
             continue
-        try:
-            document = codec.decode(text, path=node_path)
-        except MarkdownCodecError as error:
-            diagnostics.append(_diagnostic(error.code, str(error), path=relative_path))
-            notify_progress(
-                progress,
-                phase="loading",
-                current=processed,
-                total=len(node_paths),
-                message="Loading research nodes",
+        cached = cached_records.get(relative_path)
+        if cached is not None and cached.fingerprint == fingerprint:
+            record = _Record(
+                path=relative_path,
+                metadata=dict(cached.metadata),
+                body_offset=cached.body_offset,
+                revision=cached.revision,
             )
-            continue
-        record = _Record(
-            path=relative_path,
-            metadata=dict(document.metadata),
-            document=document if retain_documents else None,
-            revision=hashlib.sha256(raw).hexdigest() if retain_documents else None,
-        )
+        else:
+            cache_dirty = cache_dirty or retain_snapshot_data
+            try:
+                for _attempt in range(3):
+                    raw = node_path.read_bytes()
+                    after_read = FileFingerprint.from_path(node_path)
+                    if after_read == fingerprint:
+                        break
+                    fingerprint = after_read
+                else:
+                    raise OSError(f"node changed repeatedly while reading: {node_path}")
+                text = raw.decode("utf-8")
+            except (OSError, UnicodeError) as error:
+                diagnostics.append(
+                    _diagnostic(
+                        "file_read_error",
+                        str(error),
+                        path=relative_path,
+                    )
+                )
+                notify_progress(
+                    progress,
+                    phase="loading",
+                    current=processed,
+                    total=len(node_paths),
+                    message="Loading research nodes",
+                )
+                continue
+            try:
+                header = codec.decode_header(text, path=node_path)
+            except MarkdownCodecError as error:
+                diagnostics.append(
+                    _diagnostic(error.code, str(error), path=relative_path)
+                )
+                notify_progress(
+                    progress,
+                    phase="loading",
+                    current=processed,
+                    total=len(node_paths),
+                    message="Loading research nodes",
+                )
+                continue
+            record = _Record(
+                path=relative_path,
+                metadata=dict(header.metadata),
+                body_offset=header.body_offset if retain_snapshot_data else None,
+                revision=(
+                    hashlib.sha256(raw).hexdigest() if retain_snapshot_data else None
+                ),
+            )
         records.append(record)
         _validate_structural(record, diagnostics)
+        if (
+            retain_snapshot_data
+            and record.body_offset is not None
+            and record.revision is not None
+        ):
+            refreshed_cache.append(
+                CachedNodeRecord(
+                    path=relative_path,
+                    fingerprint=fingerprint,
+                    revision=record.revision,
+                    body_offset=record.body_offset,
+                    metadata=dict(record.metadata),
+                )
+            )
         notify_progress(
             progress,
             phase="loading",
@@ -1215,6 +1281,8 @@ def _load_records(
             total=len(node_paths),
             message="Loading research nodes",
         )
+    if retain_snapshot_data and cache_dirty:
+        write_index(project, refreshed_cache)
     return records
 
 
@@ -1651,7 +1719,7 @@ def validate_and_load_snapshot(
     records = _load_records(
         project,
         diagnostics,
-        retain_documents=True,
+        retain_snapshot_data=True,
         progress=progress,
     )
     notify_progress(
@@ -1682,12 +1750,22 @@ def validate_and_load_snapshot(
         message="Building graph indexes",
     )
     for processed, record in enumerate(records, start=1):
-        assert record.document is not None
+        assert record.body_offset is not None
         assert record.revision is not None
-        node = parse_node(record.document, revision=record.revision)
+        absolute_path = project.root / record.path
+        node = parse_node_metadata(
+            record.metadata,
+            path=absolute_path,
+            revision=record.revision,
+            body=LazyMarkdownBody(
+                absolute_path,
+                record.body_offset,
+                record.revision,
+                record.node_id or "unknown",
+            ),
+        )
         nodes.append(node)
         edges.extend(parse_edges(node, record.metadata))
-        record.document = None
         record.metadata.clear()
         notify_progress(
             progress,

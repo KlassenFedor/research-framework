@@ -330,7 +330,12 @@ def _flag_relations(args: argparse.Namespace) -> tuple[RelationDraft, ...]:
     return tuple(relations)
 
 
-def _human_body(args: argparse.Namespace) -> str | None:
+def _human_body(
+    args: argparse.Namespace,
+    *,
+    initial_body: str = "",
+    edit_by_default: bool = False,
+) -> str | None:
     body: object = args.body
     if isinstance(body, str):
         return body
@@ -340,7 +345,7 @@ def _human_body(args: argparse.Namespace) -> str | None:
             return Path(body_file).read_text(encoding="utf-8")
         except OSError as error:
             raise CliUsageError(f"cannot read body file: {error}") from error
-    if not args.edit:
+    if not args.edit and not edit_by_default:
         return None
 
     editor_value = os.environ.get("EDITOR")
@@ -355,7 +360,7 @@ def _human_body(args: argparse.Namespace) -> str | None:
 
     with tempfile.TemporaryDirectory(prefix="rf-editor-") as directory:
         body_path = Path(directory) / "body.md"
-        body_path.write_text("", encoding="utf-8")
+        body_path.write_text(initial_body, encoding="utf-8")
         try:
             result = subprocess.run(
                 [*command, str(body_path)],
@@ -466,6 +471,16 @@ def _build_parser() -> Parser:
     update.add_argument("reference")
     update.add_argument("--from-json")
     update.add_argument("--json", action="store_true")
+
+    edit = node_commands.add_parser("edit")
+    edit.add_argument("reference")
+    edit.add_argument("--expected-revision")
+    edit.add_argument("--actor", required=True)
+    edit_body = edit.add_mutually_exclusive_group()
+    edit_body.add_argument("--body")
+    edit_body.add_argument("--body-file")
+    edit_body.add_argument("--edit", action="store_true")
+    edit.add_argument("--json", action="store_true")
 
     archive = node_commands.add_parser("archive")
     archive.add_argument("reference")
@@ -710,20 +725,58 @@ def _handle(
             _require_request_fields(
                 request,
                 name="node update",
-                allowed={"patch", "expected_revision", "actor"},
-                required={"patch", "expected_revision", "actor"},
+                allowed={"patch", "body", "expected_revision", "actor"},
+                required={"expected_revision", "actor"},
             )
-            patch = request["patch"]
+            if "patch" not in request and "body" not in request:
+                raise CliUsageError("node update requires patch or body")
+            patch = request.get("patch", {})
             if not isinstance(patch, dict):
                 raise CliUsageError("patch must be an object")
+            body_value = request.get("body")
+            if "body" in request and not isinstance(body_value, str):
+                raise CliUsageError("body must be a string")
             expected_revision = _non_blank_string(
                 request["expected_revision"], "expected_revision"
             )
             updated = project.update_node(
                 args.reference,
                 patch=patch,
+                body=body_value if isinstance(body_value, str) else None,
                 expected_revision=expected_revision,
                 actor=_actor(request["actor"]),
+            )
+            data = _node_to_dict(updated)
+            _mutation_success(
+                project,
+                data,
+                json_mode=args.json,
+                message=f"Updated {updated.id}",
+            )
+        elif args.node_command == "edit":
+            current = graph.get_node(args.reference)
+            expected_revision = args.expected_revision or current.revision
+            if (
+                args.expected_revision is not None
+                and args.expected_revision != current.revision
+            ):
+                raise RevisionConflict(
+                    current.id,
+                    args.expected_revision,
+                    current.revision,
+                )
+            body_value = _human_body(
+                args,
+                initial_body=current.body,
+                edit_by_default=True,
+            )
+            assert body_value is not None
+            updated = project.update_node(
+                current.id,
+                patch={},
+                body=body_value,
+                expected_revision=expected_revision,
+                actor=_human_actor(args.actor),
             )
             data = _node_to_dict(updated)
             _mutation_success(

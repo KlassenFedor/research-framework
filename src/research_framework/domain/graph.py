@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 from collections import deque
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -63,10 +63,19 @@ class Node:
     updated_at: datetime
     updated_by: Actor
     extensions: Mapping[str, Any]
-    body: str
+    _body: str | Callable[[], str] = field(repr=False, compare=False)
     path: Path
     revision: str
     data: Mapping[str, Any]
+
+    @property
+    def body(self) -> str:
+        value = self._body
+        if isinstance(value, str):
+            return value
+        loaded = value()
+        object.__setattr__(self, "_body", loaded)
+        return loaded
 
     def __getattr__(self, name: str) -> Any:
         data = object.__getattribute__(self, "data")

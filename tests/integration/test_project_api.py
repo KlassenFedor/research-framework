@@ -15,6 +15,7 @@ from research_framework import (
     StorageError,
     ValidationFailed,
 )
+from research_framework.storage.markdown_codec import MarkdownCodec
 from tests.conftest import NODE_IDS, RELATION_IDS
 
 
@@ -168,6 +169,57 @@ def test_update_node_preserves_markdown_body_and_refreshes_audit_fields(
     assert updated.updated_by == Actor.agent("editor", run_id="agent-run-42")
     assert updated.revision != node.revision
     assert rewritten_body == original_body
+
+
+@pytest.mark.contract
+@pytest.mark.integration
+def test_update_node_can_replace_body_without_putting_it_in_front_matter(
+    example_project: Path,
+) -> None:
+    project = Project.open(example_project)
+    node = project.snapshot().get_node(NODE_IDS["hypothesis"])
+    replacement = "\n# Revised analysis\n\nThe conclusion changed.\n"
+
+    updated = project.update_node(
+        node.id,
+        patch={},
+        body=replacement,
+        expected_revision=node.revision,
+        actor=Actor.agent("editor", run_id="body-edit-1"),
+    )
+
+    assert updated.body == replacement
+    assert updated.statement == node.statement
+    assert updated.updated_by == Actor.agent("editor", run_id="body-edit-1")
+    assert updated.revision != node.revision
+    decoded = MarkdownCodec().decode(
+        updated.path.read_text(encoding="utf-8"), path=updated.path
+    )
+    assert decoded.body == replacement
+    assert "body" not in decoded.metadata
+
+
+@pytest.mark.contract
+@pytest.mark.integration
+def test_update_node_replaces_metadata_and_body_atomically(
+    example_project: Path,
+) -> None:
+    project = Project.open(example_project)
+    node = project.snapshot().get_node(NODE_IDS["claim"])
+
+    updated = project.update_node(
+        node.id,
+        patch={"summary": "Revised together with the prose."},
+        body="",
+        expected_revision=node.revision,
+        actor=Actor.human("reviewer"),
+    )
+
+    assert updated.summary == "Revised together with the prose."
+    assert updated.body == ""
+    reopened = Project.open(example_project).snapshot().get_node(node.id)
+    assert reopened.summary == updated.summary
+    assert reopened.body == ""
 
 
 @pytest.mark.contract

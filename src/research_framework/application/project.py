@@ -626,11 +626,18 @@ class Project:
         node_id: str,
         *,
         patch: Mapping[str, Any],
+        body: str | None = None,
         expected_revision: str,
         actor: Actor,
     ) -> Node:
         self._last_diagnostics = ()
-        node, metadata, body = self._read_current(
+        if body is not None and not isinstance(body, str):
+            raise self._invalid(
+                "invalid_field_type",
+                "body must be a string",
+                field="body",
+            )
+        node, metadata, current_body = self._read_current(
             node_id, expected_revision=expected_revision
         )
         immutable = {
@@ -675,7 +682,7 @@ class Project:
         diagnostics = self._replace_document(
             node.path,
             metadata,
-            body,
+            current_body if body is None else body,
             expected_revision=expected_revision,
         )
         self._last_diagnostics = diagnostics

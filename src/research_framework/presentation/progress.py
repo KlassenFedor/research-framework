@@ -84,8 +84,8 @@ def terminal_progress(
     stream: TextIO | None = None,
 ) -> Iterator[ProgressCallback | None]:
     output = stream or sys.stderr
-    enabled = not machine_output and (
-        mode == "always" or (mode == "auto" and output.isatty())
+    enabled = mode == "always" or (
+        mode == "auto" and not machine_output and output.isatty()
     )
     renderer = TerminalProgressBar(output, enabled=enabled)
     try:

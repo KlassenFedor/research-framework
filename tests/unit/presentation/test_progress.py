@@ -35,13 +35,14 @@ def test_terminal_progress_renders_counts_and_finishes_each_phase() -> None:
     assert output.endswith("\n")
 
 
-def test_terminal_progress_is_silent_for_machine_output_even_when_forced() -> None:
+def test_terminal_progress_can_be_forced_for_machine_output() -> None:
     stream = StringIO()
 
     with terminal_progress("always", machine_output=True, stream=stream) as progress:
-        assert progress is None
+        assert progress is not None
+        progress(event("loading", 1, 1))
 
-    assert stream.getvalue() == ""
+    assert "Loading" in stream.getvalue()
 
 
 def test_terminal_progress_auto_mode_is_silent_for_non_tty_stream() -> None:

@@ -34,10 +34,11 @@ Markdown/YAML и может быть закоммичен в Git.
 7. После серии изменений выполните `rf validate --json` и
    `rf format --check --json`.
 
-Progress bar намеренно отключён в `--json` и для raw `graph export`: stdout и
-stderr остаются пригодными для строгого разбора. Если автоматизация запускает
-human-mode и ей нужен heartbeat в логах, используйте корневой флаг
-`rf --progress COMMAND ...`.
+Автоматический progress отключён в `--json` и для raw `graph export`. Если
+автоматизации нужен heartbeat, используйте корневой флаг
+`rf --progress COMMAND ...`: progress пойдёт в `stderr`, а `stdout` по-прежнему
+будет содержать ровно один JSON document. `--no-progress` запрещает индикатор
+явно.
 
 Инициализация не использует JSON input, но поддерживает JSON output:
 
@@ -197,6 +198,11 @@ rf node list --kind hypothesis --status active --tag retrieval --json
 `list` возвращает array компактных Nodes без `body` и `revision`. Несколько
 `--tag` означают, что Node должен содержать все заданные теги.
 
+Повторное открытие использует производный `.research-cache/index-v1.json` и не
+декодирует YAML неизменившихся Nodes. Кеш не является источником истины:
+`rf validate` всегда читает Markdown, а повреждённый или удалённый кеш
+перестраивается автоматически.
+
 REF разрешается в порядке: полный ID, точный alias, однозначный ID prefix.
 Неоднозначность никогда не разрешается эвристически.
 
@@ -215,15 +221,30 @@ rf node update REF --from-json update.json --json
     "tags": ["retrieval", "verified"],
     "status": "active"
   },
+  "body": "# Итог\n\nГипотеза подтверждена повторным запуском.\n",
   "expected_revision": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "actor": {"kind": "agent", "id": "reviewer", "run_id": "review-7"}
 }
 ```
 
-Разрешены изменяемые metadata-поля уже существующего Node, а также
-`summary`, `tags`, `aliases`, `extensions`. Запрещены `format_version`, `id`,
-`kind`, `created_at`, `created_by` и `relations`. Body через `node update` не
-изменяется. Status: `draft`, `active`, `closed`, `archived`.
+`patch` и `body` необязательны по отдельности, но хотя бы одно из них должно
+присутствовать. `body` находится на верхнем уровне envelope, а не внутри
+metadata patch; это строка, где `""` означает пустое тело. Разрешены изменяемые
+metadata-поля существующего Node, а также `summary`, `tags`, `aliases`,
+`extensions`. Запрещены `format_version`, `id`, `kind`, `created_at`,
+`created_by` и `relations`. Status: `draft`, `active`, `closed`, `archived`.
+
+Metadata и body записываются атомарно. Body-only update также обновляет
+`updated_at` и `updated_by`. Для интерактивной правки без JSON используйте:
+
+```bash
+rf node edit REF --actor fedor
+rf node edit REF --body-file revised.md --actor fedor
+```
+
+Без body-флага `node edit` открывает `$EDITOR` с текущим содержимым. Команда
+сама использует revision, прочитанную перед запуском редактора; необязательный
+`--expected-revision` позволяет потребовать заранее известную revision.
 
 `expected_revision` — SHA-256 исходных байтов Node-файла из последнего
 `node show`. При несовпадении команда возвращает exit `5` и актуальный файл не
@@ -431,6 +452,14 @@ run = project.create_node(
     ),
 )
 print(run.id, run.revision)
+
+updated = project.update_node(
+    run.id,
+    patch={"outcome": "completed"},
+    body="# Result\n\nRun completed successfully.\n",
+    expected_revision=run.revision,
+    actor=Actor.agent("runner", run_id="bench-42"),
+)
 ```
 
 Callback получает события `discovering`, `loading`, `validating` и `indexing`;
