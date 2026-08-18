@@ -225,6 +225,53 @@ h1 { margin: 0; max-width: 60vw; overflow: hidden; text-overflow: ellipsis; whit
 }
 .kind-toggle:has(input:checked) { color: var(--text); border-color: var(--kind-color); }
 .kind-toggle input { accent-color: var(--kind-color); }
+.tag-picker { position: relative; }
+.tag-picker > summary {
+  min-width: 92px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #111a2e;
+  color: var(--text);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.tag-picker > summary::-webkit-details-marker { display: none; }
+.tag-picker > summary::after { content: " ▾"; color: var(--muted); }
+.tag-picker[open] > summary { border-color: var(--accent); }
+.tag-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  left: 0;
+  width: min(330px, 82vw);
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 12px 36px #0009;
+}
+.tag-menu-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.tag-menu-header span { color: var(--muted); }
+.tag-menu-header select { flex: 1; min-width: 90px; }
+.tag-menu-header button { padding: 6px 9px; }
+.tag-menu-header button:disabled { cursor: default; opacity: .45; }
+#tag-filters { display: flex; flex-wrap: wrap; gap: 6px; max-height: 230px; overflow: auto; }
+.tag-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.tag-option:has(input:checked) { border-color: var(--accent); color: var(--text); background: #182743; }
+.tag-option input { accent-color: var(--accent); }
+.tag-count { color: var(--muted); font-size: 11px; }
 .spacer { flex: 1; }
 .workspace { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 340px; min-height: 0; }
 .stage { position: relative; min-width: 0; overflow: hidden; }
@@ -251,6 +298,7 @@ h1 { margin: 0; max-width: 60vw; overflow: hidden; text-overflow: ellipsis; whit
 .badge { display: inline-block; margin: 0 5px 5px 0; padding: 2px 7px; border-radius: 999px; background: var(--panel-2); color: var(--muted); }
 .node-id { margin: 3px 0 12px; color: var(--muted); font: 12px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
 .summary { color: #c7d2e5; }
+.filter-note { margin: 10px 0; padding: 7px 9px; border-left: 3px solid var(--focus); background: #302b1d; color: #f4dda0; }
 .field { margin: 8px 0; }
 .field dt { color: var(--muted); }
 .field dd { margin: 2px 0 0; overflow-wrap: anywhere; white-space: pre-wrap; }
@@ -277,6 +325,11 @@ _SCRIPT = r"""
   const details = document.getElementById("details");
   const search = document.getElementById("search");
   const kindFilters = document.getElementById("kind-filters");
+  const tagPicker = document.getElementById("tag-picker");
+  const tagPickerSummary = document.getElementById("tag-picker-summary");
+  const tagFilters = document.getElementById("tag-filters");
+  const tagMatch = document.getElementById("tag-match");
+  const clearTags = document.getElementById("clear-tags");
   const relationFilter = document.getElementById("relation-filter");
   const statusFilter = document.getElementById("status-filter");
   const counts = document.getElementById("counts");
@@ -293,6 +346,7 @@ _SCRIPT = r"""
   const byId = new Map(nodes.map(node => [node.id, node]));
   const edges = data.edges.filter(edge => byId.has(edge.source) && byId.has(edge.target));
   const selectedKinds = new Set(nodes.map(node => node.kind));
+  const selectedTags = new Set();
   let selectedId = data.focus || (nodes[0] && nodes[0].id) || null;
   let scale = 1;
   let offsetX = 0;
@@ -373,17 +427,26 @@ _SCRIPT = r"""
   function applyFilters() {
     const query = search.value.trim().toLocaleLowerCase();
     const status = statusFilter.value;
+    const tags = [...selectedTags];
     nodes.forEach(node => {
       const haystack = [node.id, node.title, node.summary || "", ...node.tags, ...node.aliases]
         .join(" ").toLocaleLowerCase();
+      const matchesTags = !tags.length || (tagMatch.value === "all"
+        ? tags.every(tag => node.tags.includes(tag))
+        : tags.some(tag => node.tags.includes(tag)));
       node.visible = selectedKinds.has(node.kind)
         && (status === "all" || node.status === status)
+        && matchesTags
         && (!query || haystack.includes(query));
     });
-    if (selectedId && !byId.get(selectedId).visible) selectedId = null;
     const shownNodes = visibleNodes().length;
     const shownEdges = visibleEdges().length;
     counts.textContent = `${shownNodes} nodes · ${shownEdges} relations`;
+    tagPickerSummary.textContent = tags.length
+      ? `tags: ${tags.length} (${tagMatch.value})`
+      : "tags: all";
+    tagMatch.disabled = tags.length < 2;
+    clearTags.disabled = !tags.length;
     renderDetails();
     schedule();
   }
@@ -412,6 +475,32 @@ _SCRIPT = r"""
       label.append(input, text);
       kindFilters.append(label);
     });
+
+    const tagCounts = new Map();
+    nodes.forEach(node => node.tags.forEach(tag => {
+      tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1);
+    }));
+    [...tagCounts].sort(([left], [right]) => left.localeCompare(right))
+      .forEach(([tag, count]) => {
+        const label = document.createElement("label");
+        label.className = "tag-option";
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.value = tag;
+        input.addEventListener("change", () => {
+          if (input.checked) selectedTags.add(tag); else selectedTags.delete(tag);
+          applyFilters();
+        });
+        const text = document.createElement("span");
+        text.textContent = tag;
+        const amount = document.createElement("span");
+        amount.className = "tag-count";
+        amount.textContent = String(count);
+        label.append(input, text, amount);
+        tagFilters.append(label);
+      });
+    tagPicker.hidden = tagCounts.size === 0;
+
     [...new Set(edges.map(edge => edge.kind))].sort()
       .forEach(kind => addOption(relationFilter, kind, kind));
     [...new Set(nodes.map(node => node.status))].sort()
@@ -628,7 +717,7 @@ _SCRIPT = r"""
   function renderDetails() {
     details.replaceChildren();
     const node = selectedId && byId.get(selectedId);
-    if (!node || !node.visible) {
+    if (!node) {
       details.classList.add("empty-panel");
       appendText(details, "p", "Select a node to inspect its metadata and relations.", "empty");
       return;
@@ -637,6 +726,9 @@ _SCRIPT = r"""
     appendText(details, "h2", node.title);
     appendText(details, "div", node.id, "node-id");
     [node.kind, node.status, ...node.tags].forEach(value => appendText(details, "span", value, "badge"));
+    if (!node.visible) {
+      appendText(details, "p", "Hidden by current filters · details remain available", "filter-note");
+    }
     if (node.summary) appendText(details, "p", node.summary, "summary");
 
     const ignored = new Set(["format_version", "id", "kind", "title", "status", "summary", "tags", "aliases"]);
@@ -669,7 +761,8 @@ _SCRIPT = r"""
       row.className = "relation";
       const button = document.createElement("button");
       button.type = "button";
-      button.textContent = `${outgoing ? "→" : "←"} ${edge.kind}: ${neighbor ? neighbor.title : neighborId}`;
+      const hidden = neighbor && !neighbor.visible ? " (hidden)" : "";
+      button.textContent = `${outgoing ? "→" : "←"} ${edge.kind}: ${neighbor ? neighbor.title : neighborId}${hidden}`;
       button.addEventListener("click", () => selectNode(neighborId));
       row.append(button);
       if (edge.rationale) appendText(row, "small", edge.rationale);
@@ -734,6 +827,13 @@ _SCRIPT = r"""
   search.addEventListener("input", applyFilters);
   relationFilter.addEventListener("change", applyFilters);
   statusFilter.addEventListener("change", applyFilters);
+  tagMatch.addEventListener("change", applyFilters);
+  clearTags.addEventListener("click", () => {
+    selectedTags.clear();
+    tagFilters.querySelectorAll('input[type="checkbox"]')
+      .forEach(input => { input.checked = false; });
+    applyFilters();
+  });
   showLabels.addEventListener("change", schedule);
   document.getElementById("fit").addEventListener("click", fit);
   document.getElementById("reset-layout").addEventListener("click", () => {
@@ -744,6 +844,12 @@ _SCRIPT = r"""
     schedule();
   });
   window.addEventListener("resize", resize);
+  document.addEventListener("click", event => {
+    if (tagPicker.open && !tagPicker.contains(event.target)) tagPicker.open = false;
+  });
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape") tagPicker.open = false;
+  });
 
   loadPositions();
   buildControls();
@@ -783,6 +889,20 @@ def render_graph_html(view: GraphView) -> str:
     <div class="toolbar" aria-label="Graph controls">
       <input id="search" type="search" placeholder="Search title, ID, tag or alias" aria-label="Search nodes">
       <div id="kind-filters" aria-label="Node kind filters"></div>
+      <details class="tag-picker" id="tag-picker">
+        <summary id="tag-picker-summary">tags: all</summary>
+        <div class="tag-menu">
+          <div class="tag-menu-header">
+            <span>Match</span>
+            <select id="tag-match" aria-label="Tag matching mode">
+              <option value="any">any selected tag</option>
+              <option value="all">all selected tags</option>
+            </select>
+            <button id="clear-tags" type="button">Clear</button>
+          </div>
+          <div id="tag-filters" aria-label="Tag filters"></div>
+        </div>
+      </details>
       <select id="status-filter" aria-label="Filter node status"><option value="all">all statuses</option></select>
       <select id="relation-filter" aria-label="Filter relation kind"><option value="all">all relations</option></select>
       <label><input id="show-labels" type="checkbox" checked> relation labels</label>

@@ -734,7 +734,10 @@ class Repository(Protocol):
 Presentation не читает исследовательские файлы напрямую: получает immutable
 GraphSnapshot. HTML не зависит от CDN, не исполняет пользовательский Markdown
 как markup и не меняет canonical vault. Payload встраивается как escaped JSON,
-а пользовательские значения выводятся через `textContent`.
+а пользовательские значения выводятся через `textContent`. Интерактивные
+фильтры по tags (`any`/`all`), kind, status и relation kind выполняются только в
+браузере и не меняют GraphViewModel. Selection карточки не зависит от Canvas
+visibility: скрытая фильтром Node остаётся доступной через relations.
 
 ## 10. Python API
 

@@ -142,6 +142,11 @@ def test_html_contains_interactive_graph_controls(example_project) -> None:
         "graph-canvas",
         "search",
         "kind-filters",
+        "tag-picker",
+        "tag-picker-summary",
+        "tag-filters",
+        "tag-match",
+        "clear-tags",
         "relation-filter",
         "fit",
         "reset-layout",
@@ -152,6 +157,23 @@ def test_html_contains_interactive_graph_controls(example_project) -> None:
     assert "localStorage" in html
     assert "requestAnimationFrame" in html
     assert "devicePixelRatio" in html
+    assert "selectedTags" in html
+    assert ".some(tag => node.tags.includes(tag))" in html
+    assert ".every(tag => node.tags.includes(tag))" in html
+    assert "tags: all" in html
+
+
+@pytest.mark.contract
+def test_hidden_nodes_remain_selectable_from_relation_details(example_project) -> None:
+    graph = Project.open(example_project).snapshot()
+    html = render_graph_html(build_graph_view(graph, title="Example graph"))
+
+    assert (
+        "if (selectedId && !byId.get(selectedId).visible) selectedId = null" not in html
+    )
+    assert "if (!node || !node.visible)" not in html
+    assert "Hidden by current filters" in html
+    assert 'button.addEventListener("click", () => selectNode(neighborId))' in html
 
 
 @pytest.mark.contract
