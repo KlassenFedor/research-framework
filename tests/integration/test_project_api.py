@@ -105,6 +105,31 @@ def test_create_node_generates_typed_ulid_and_one_markdown_file(
 
 @pytest.mark.contract
 @pytest.mark.integration
+@pytest.mark.parametrize(
+    ("title", "expected_slug"),
+    [
+        ("Тестовый вопрос", "тестовый-вопрос"),
+        ("研究问题", "研究问题"),
+        ("Résumé / NAÏVE", "résumé-naïve"),
+    ],
+)
+def test_create_node_preserves_unicode_in_human_readable_slug(
+    example_project: Path,
+    title: str,
+    expected_slug: str,
+) -> None:
+    project = Project.open(example_project)
+
+    node = project.create_node(
+        ClaimDraft(title=title, statement="Unicode titles remain readable."),
+        actor=Actor.human("fedor"),
+    )
+
+    assert node.path.name == f"{node.id}--{expected_slug}.md"
+
+
+@pytest.mark.contract
+@pytest.mark.integration
 def test_old_snapshot_remains_immutable_after_project_mutation(
     example_project: Path,
 ) -> None:

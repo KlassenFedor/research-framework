@@ -150,21 +150,112 @@ class GraphSnapshot:
         for edge in edge_map.values():
             outgoing.setdefault(edge.source, []).append(edge)
             incoming.setdefault(edge.target, []).append(edge)
-        self._nodes = MappingProxyType(node_map)
-        self._edges = MappingProxyType(edge_map)
-        self._aliases = MappingProxyType(aliases)
-        self._outgoing = MappingProxyType(
-            {
-                key: tuple(sorted(value, key=lambda edge: edge.id))
-                for key, value in outgoing.items()
-            }
+        self._nodes = node_map
+        self._edges = edge_map
+        self._aliases = aliases
+        self._outgoing = {
+            key: tuple(sorted(value, key=lambda edge: edge.id))
+            for key, value in outgoing.items()
+        }
+        self._incoming = {
+            key: tuple(sorted(value, key=lambda edge: edge.id))
+            for key, value in incoming.items()
+        }
+
+    @classmethod
+    def _from_indexes(
+        cls,
+        *,
+        nodes: Mapping[str, Node],
+        edges: Mapping[str, Edge],
+        aliases: Mapping[str, str],
+        outgoing: Mapping[str, tuple[Edge, ...]],
+        incoming: Mapping[str, tuple[Edge, ...]],
+    ) -> GraphSnapshot:
+        snapshot = cls.__new__(cls)
+        snapshot._nodes = dict(nodes)
+        snapshot._edges = dict(edges)
+        snapshot._aliases = dict(aliases)
+        snapshot._outgoing = dict(outgoing)
+        snapshot._incoming = dict(incoming)
+        return snapshot
+
+    def _node_by_id(self, node_id: str) -> Node | None:
+        """Return only an exact ID match, without alias or prefix resolution."""
+
+        return self._nodes.get(node_id)
+
+    def _alias_owner(self, alias: str) -> Node | None:
+        """Return the Node owning an exact alias."""
+
+        node_id = self._aliases.get(alias)
+        return self._nodes.get(node_id) if node_id is not None else None
+
+    def _edge_by_id(self, edge_id: str) -> Edge | None:
+        """Return an exact relation match without raising."""
+
+        return self._edges.get(edge_id)
+
+    def _replacing_node(self, node: Node, edges: Iterable[Edge]) -> GraphSnapshot:
+        """Create a snapshot by replacing one Node and its outgoing relations.
+
+        Existing snapshots remain immutable. Only indexes affected by the
+        replacement are recomputed; no document is read from storage.
+        """
+
+        snapshot = self._from_indexes(
+            nodes=self._nodes,
+            edges=self._edges,
+            aliases=self._aliases,
+            outgoing=self._outgoing,
+            incoming=self._incoming,
         )
-        self._incoming = MappingProxyType(
-            {
-                key: tuple(sorted(value, key=lambda edge: edge.id))
-                for key, value in incoming.items()
-            }
-        )
+        snapshot._replace_node_in_place(node, edges)
+        return snapshot
+
+    def _replace_node_in_place(self, node: Node, edges: Iterable[Edge]) -> None:
+        """Update indexes owned exclusively by a Project instance."""
+
+        replacement_edges = tuple(sorted(edges, key=lambda edge: edge.id))
+        if any(edge.source != node.id for edge in replacement_edges):
+            raise ValueError("replacement edges must originate from the node")
+
+        previous_node = self._nodes.get(node.id)
+        previous_edges = self._outgoing.get(node.id, ())
+
+        self._nodes[node.id] = node
+
+        for edge in previous_edges:
+            self._edges.pop(edge.id, None)
+        for edge in replacement_edges:
+            self._edges[edge.id] = edge
+
+        if previous_node is not None:
+            for alias in previous_node.aliases:
+                if self._aliases.get(alias) == node.id:
+                    self._aliases.pop(alias)
+        for alias in node.aliases:
+            self._aliases[alias] = node.id
+
+        self._outgoing[node.id] = replacement_edges
+
+        affected_targets = {
+            *(edge.target for edge in previous_edges),
+            *(edge.target for edge in replacement_edges),
+        }
+        for target in affected_targets:
+            target_edges = [
+                edge
+                for edge in self._incoming.get(target, ())
+                if edge.source != node.id
+            ]
+            target_edges.extend(
+                edge for edge in replacement_edges if edge.target == target
+            )
+            self._incoming[target] = tuple(
+                sorted(target_edges, key=lambda edge: edge.id)
+            )
+        self._incoming.setdefault(node.id, ())
 
     def get_node(self, reference: str) -> Node:
         if reference in self._nodes:

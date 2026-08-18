@@ -160,7 +160,7 @@ def test_remove_edge_rejects_removing_last_assessment_basis(
 
 @pytest.mark.contract
 @pytest.mark.integration
-def test_replacement_rolls_back_exact_bytes_when_refresh_fails(
+def test_replacement_rolls_back_exact_bytes_when_snapshot_publish_fails(
     example_project: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -169,12 +169,13 @@ def test_replacement_rolls_back_exact_bytes_when_refresh_fails(
     node = snapshot.get_node(NODE_IDS["claim"])
     before = _node_files(example_project)
 
-    def fail_refresh() -> None:
-        raise RuntimeError("simulated refresh failure")
+    def fail_publish(*args: object) -> None:
+        del args
+        raise RuntimeError("simulated snapshot publish failure")
 
-    monkeypatch.setattr(project, "_refresh", fail_refresh)
+    monkeypatch.setattr(project, "_publish_document", fail_publish)
 
-    with pytest.raises(RuntimeError, match="simulated refresh failure"):
+    with pytest.raises(RuntimeError, match="simulated snapshot publish failure"):
         project.update_node(
             node.id,
             patch={"summary": "Must be rolled back"},

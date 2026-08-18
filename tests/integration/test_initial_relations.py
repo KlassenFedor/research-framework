@@ -414,7 +414,7 @@ def test_evidence_can_be_created_without_provenance_when_policy_is_disabled(
 
 @pytest.mark.contract
 @pytest.mark.integration
-def test_create_node_rolls_back_its_file_when_refresh_fails(
+def test_create_node_rolls_back_its_file_when_snapshot_publish_fails(
     example_project: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -422,12 +422,13 @@ def test_create_node_rolls_back_its_file_when_refresh_fails(
     snapshot = project.snapshot()
     before = _node_files(example_project)
 
-    def fail_refresh() -> None:
-        raise RuntimeError("simulated refresh failure")
+    def fail_publish(*args: object) -> None:
+        del args
+        raise RuntimeError("simulated snapshot publish failure")
 
-    monkeypatch.setattr(project, "_refresh", fail_refresh)
+    monkeypatch.setattr(project, "_publish_document", fail_publish)
 
-    with pytest.raises(RuntimeError, match="simulated refresh failure"):
+    with pytest.raises(RuntimeError, match="simulated snapshot publish failure"):
         project.create_node(
             ClaimDraft(title="Rolled back claim", statement="Never becomes visible."),
             actor=Actor.human("creator"),

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 import secrets
 import tempfile
 import time
+import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
 from datetime import UTC, datetime
@@ -35,7 +35,7 @@ from research_framework.storage.discovery import (
     discover_node_files,
     discover_project,
 )
-from research_framework.storage.loader import load_snapshot
+from research_framework.storage.loader import load_snapshot, parse_edges, parse_node
 from research_framework.storage.markdown_codec import DecodedMarkdown, MarkdownCodec
 from research_framework.storage.yaml_codec import dump_restricted_yaml
 
@@ -108,8 +108,19 @@ def _now() -> str:
 
 
 def _slug(title: str) -> str:
-    value = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
-    return value[:80] or "node"
+    normalized = unicodedata.normalize("NFKC", title).casefold()
+    characters: list[str] = []
+    separator_pending = False
+    for character in normalized:
+        category = unicodedata.category(character)
+        if character.isalnum() or (category.startswith("M") and characters):
+            if separator_pending and characters:
+                characters.append("-")
+            characters.append(character)
+            separator_pending = False
+        elif characters:
+            separator_pending = True
+    return "".join(characters)[:80].rstrip("-") or "node"
 
 
 def _plain(value: Any) -> Any:
@@ -130,6 +141,7 @@ class Project:
     def __init__(self, discovered: DiscoveredProject, snapshot: GraphSnapshot) -> None:
         self._discovered = discovered
         self._snapshot = snapshot
+        self._snapshot_shared = False
         self._codec = MarkdownCodec()
         self._last_diagnostics: tuple[Diagnostic, ...] = ()
 
@@ -180,6 +192,7 @@ class Project:
         return cls.open(target)
 
     def snapshot(self) -> GraphSnapshot:
+        self._snapshot_shared = True
         return self._snapshot
 
     def last_diagnostics(self) -> tuple[Diagnostic, ...]:
@@ -299,6 +312,7 @@ class Project:
         if any(item.severity is DiagnosticSeverity.ERROR for item in diagnostics):
             raise ValidationFailed(diagnostics)
         self._snapshot = load_snapshot(self._discovered)
+        self._snapshot_shared = False
 
     def _safe_target(self, target: Path) -> None:
         vault = self._discovered.vault.resolve()
@@ -314,7 +328,7 @@ class Project:
         body: str,
         *,
         expected_revision: str | None = None,
-    ) -> None:
+    ) -> tuple[DecodedMarkdown, bytes]:
         self._safe_target(target)
         if expected_revision is not None:
             try:
@@ -333,8 +347,21 @@ class Project:
         )
         # Decode before touching the destination so serialization failures are
         # never able to corrupt a valid node.
-        self._codec.decode(encoded, path=target)
-        self._atomic_write_bytes(target, encoded.encode("utf-8"))
+        document = self._codec.decode(encoded, path=target)
+        raw = encoded.encode("utf-8")
+        self._atomic_write_bytes(target, raw)
+        return document, raw
+
+    def _publish_document(self, document: DecodedMarkdown, raw: bytes) -> None:
+        """Publish one already validated and serialized document in memory."""
+
+        node = parse_node(document, revision=hashlib.sha256(raw).hexdigest())
+        edges = parse_edges(node, document.metadata)
+        if self._snapshot_shared:
+            self._snapshot = self._snapshot._replacing_node(node, edges)
+        else:
+            self._snapshot._replace_node_in_place(node, edges)
+        self._snapshot_shared = False
 
     def _atomic_write_bytes(self, target: Path, content: bytes) -> None:
         self._safe_target(target)
@@ -385,6 +412,7 @@ class Project:
             self._discovered,
             path=target,
             metadata=metadata,
+            snapshot=self._snapshot,
         )
         if any(item.severity is DiagnosticSeverity.ERROR for item in diagnostics):
             raise ValidationFailed(diagnostics)
@@ -411,14 +439,14 @@ class Project:
 
         written = False
         try:
-            self._write_document(
+            document, raw = self._write_document(
                 target,
                 metadata,
                 body,
                 expected_revision=expected_revision,
             )
             written = True
-            self._refresh()
+            self._publish_document(document, raw)
         except Exception:
             if written:
                 try:
@@ -511,9 +539,9 @@ class Project:
 
         written = False
         try:
-            self._write_document(target, metadata, body)
+            document, raw = self._write_document(target, metadata, body)
             written = True
-            self._refresh()
+            self._publish_document(document, raw)
         except Exception:
             if written:
                 try:

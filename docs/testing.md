@@ -17,6 +17,7 @@
 | Discovery | Поиск от вложенного пути, границы vault, symlinks, детерминизм |
 | Validation | Syntax, structural, referential, semantic и graph diagnostics |
 | Storage | Candidate prevalidation, atomic write/rollback, revision conflict, локальность diff, защита путей |
+| Mutation performance | Нет повторного vault scan/reload; copy-on-write сохраняет старые snapshots |
 | Formatting | Read-only check, canonical front matter, byte-exact body, idempotence, rollback, concurrent edits |
 | Python API | Init/open, atomic mutations, operation diagnostics, snapshots |
 | CLI | Human/JSON warnings, таблицы/графы, `$EDITOR`, initial relations, stdin и exit codes |
@@ -48,13 +49,13 @@
 
 ## Текущий статус
 
-На 2026-08-18 pytest собирает и успешно выполняет 408 сценариев:
+На 2026-08-18 pytest собирает и успешно выполняет 412 сценариев:
 
 ```text
-408 passed
+412 passed
 ```
 
-Branch coverage составляет 70,00% при обязательном пороге 70%. CLI contract
+Branch coverage составляет 71,16% при обязательном пороге 70%. CLI contract
 tests запускают отдельный процесс и поэтому не входят в coverage родительского
 процесса. Дополнительно
 проходят strict mypy, Ruff, Ruff format check, `compileall`, сборка пакета и

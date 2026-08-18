@@ -16,6 +16,7 @@ from research_framework.domain.enums import (
     NodeKind,
     NodeStatus,
 )
+from research_framework.domain.graph import Edge, GraphSnapshot
 from research_framework.storage.discovery import (
     DiscoveredProject,
     discover_node_files,
@@ -1164,27 +1165,369 @@ def _validate_records(
     return _sorted_diagnostics(diagnostics)
 
 
+def _validate_candidate_uniqueness(
+    project: DiscoveredProject,
+    snapshot: GraphSnapshot,
+    record: _Record,
+    diagnostics: list[Diagnostic],
+) -> None:
+    node_id = record.node_id
+    if node_id is None:
+        return
+
+    candidate_path = project.root / record.path
+    existing_node = snapshot._node_by_id(node_id)
+    if existing_node is not None and existing_node.path != candidate_path:
+        diagnostics.append(
+            _diagnostic(
+                "duplicate_node_id",
+                f"duplicate node id: {node_id}",
+                path=record.path,
+                node_id=node_id,
+                details={
+                    "paths": sorted(
+                        (
+                            str(existing_node.path.relative_to(project.root)),
+                            str(record.path),
+                        )
+                    )
+                },
+            )
+        )
+
+    id_alias_owner = snapshot._alias_owner(node_id)
+    if id_alias_owner is not None:
+        diagnostics.append(
+            _diagnostic(
+                "duplicate_alias",
+                f"alias is not unique: {node_id}",
+                path=id_alias_owner.path.relative_to(project.root),
+                node_id=id_alias_owner.id,
+                field="aliases",
+            )
+        )
+
+    aliases = record.metadata.get("aliases", [])
+    if isinstance(aliases, list):
+        for alias in aliases:
+            if not isinstance(alias, str):
+                continue
+            node_owner = snapshot._node_by_id(alias)
+            alias_owner = snapshot._alias_owner(alias)
+            if (
+                alias == node_id
+                or node_owner is not None
+                or (alias_owner is not None and alias_owner.id != node_id)
+            ):
+                diagnostics.append(
+                    _diagnostic(
+                        "duplicate_alias",
+                        f"alias is not unique: {alias}",
+                        path=record.path,
+                        node_id=node_id,
+                        field="aliases",
+                    )
+                )
+
+    relations = record.metadata.get("relations", [])
+    if not isinstance(relations, list):
+        return
+    seen_edge_ids: set[str] = set()
+    for relation in relations:
+        if not isinstance(relation, dict):
+            continue
+        edge_id = relation.get("id")
+        if not isinstance(edge_id, str):
+            continue
+        existing_edge = snapshot._edge_by_id(edge_id)
+        if edge_id in seen_edge_ids or (
+            existing_edge is not None and existing_edge.source != node_id
+        ):
+            diagnostics.append(
+                _diagnostic(
+                    "duplicate_edge_id",
+                    f"duplicate edge id: {edge_id}",
+                    path=record.path,
+                    node_id=node_id,
+                    edge_id=edge_id,
+                )
+            )
+        seen_edge_ids.add(edge_id)
+
+
+def _cycle_details(
+    source_id: str,
+    target_id: str,
+    path: tuple[Edge, ...],
+) -> dict[str, list[str]]:
+    intermediate = [edge.target for edge in path[:-1]]
+    return {"cycle": [source_id, target_id, *intermediate]}
+
+
+def _validate_candidate_relations(
+    project: DiscoveredProject,
+    snapshot: GraphSnapshot,
+    record: _Record,
+    diagnostics: list[Diagnostic],
+) -> None:
+    source_id = record.node_id
+    source_kind = record.kind
+    if source_id is None:
+        return
+    relations = record.metadata.get("relations", [])
+    if not isinstance(relations, list):
+        return
+
+    instance_count = 0
+    provenance_count = 0
+    assesses_count = 0
+    basis_count = 0
+    cycle_reported: set[EdgeKind] = set()
+    for index, relation in enumerate(relations):
+        if not isinstance(relation, dict):
+            continue
+        relation_id = relation.get("id")
+        target_id = relation.get("target")
+        try:
+            edge_kind = EdgeKind(relation.get("kind"))
+        except (TypeError, ValueError):
+            continue
+
+        if edge_kind is EdgeKind.INSTANCE_OF:
+            instance_count += 1
+        elif edge_kind is EdgeKind.DERIVED_FROM:
+            provenance_count += 1
+        elif edge_kind is EdgeKind.ASSESSES:
+            assesses_count += 1
+        elif edge_kind is EdgeKind.BASED_ON:
+            basis_count += 1
+
+        if target_id == source_id and edge_kind is not EdgeKind.RELATED_TO:
+            diagnostics.append(
+                _diagnostic(
+                    "self_relation",
+                    "relation cannot target its source",
+                    path=record.path,
+                    node_id=source_id,
+                    edge_id=relation_id if isinstance(relation_id, str) else None,
+                    field=f"relations[{index}].target",
+                )
+            )
+
+        if not isinstance(target_id, str):
+            continue
+        if target_id == source_id:
+            target_kind = record.kind
+            target_status = record.metadata.get("status")
+        else:
+            target = snapshot._node_by_id(target_id)
+            if target is None:
+                diagnostics.append(
+                    _diagnostic(
+                        "dangling_relation",
+                        "Relation target does not exist",
+                        path=record.path,
+                        node_id=source_id,
+                        edge_id=(relation_id if isinstance(relation_id, str) else None),
+                        field=f"relations[{index}].target",
+                        suggestion="Create the target or remove the relation",
+                        details={"target": target_id},
+                    )
+                )
+                continue
+            target_kind = target.kind
+            target_status = target.status.value
+
+        if (
+            source_kind is not None
+            and target_kind is not None
+            and not relation_is_allowed(source_kind, edge_kind, target_kind)
+        ):
+            diagnostics.append(
+                _diagnostic(
+                    "relation_kind_mismatch",
+                    "source and target kinds are invalid for relation",
+                    path=record.path,
+                    node_id=source_id,
+                    edge_id=relation_id if isinstance(relation_id, str) else None,
+                    field=f"relations[{index}].kind",
+                )
+            )
+
+        if target_status == "archived":
+            diagnostics.append(
+                _diagnostic(
+                    "archived_target",
+                    "relation targets an archived node",
+                    path=record.path,
+                    node_id=source_id,
+                    edge_id=relation_id if isinstance(relation_id, str) else None,
+                    field=f"relations[{index}].target",
+                    severity=DiagnosticSeverity.WARNING,
+                )
+            )
+
+        cycle_is_forbidden = edge_kind is EdgeKind.DECOMPOSES or (
+            edge_kind is EdgeKind.DEPENDS_ON
+            and project.config.policies.forbid_dependency_cycles
+        )
+        if (
+            cycle_is_forbidden
+            and edge_kind not in cycle_reported
+            and target_id == source_id
+        ):
+            code = (
+                "dependency_cycle"
+                if edge_kind is EdgeKind.DEPENDS_ON
+                else "decomposition_cycle"
+            )
+            diagnostics.append(
+                _diagnostic(
+                    code,
+                    f"{edge_kind.value} relations contain a cycle",
+                    details={"cycle": [source_id]},
+                )
+            )
+            cycle_reported.add(edge_kind)
+        if (
+            cycle_is_forbidden
+            and edge_kind not in cycle_reported
+            and target_id != source_id
+            and snapshot._node_by_id(source_id) is not None
+            and snapshot._node_by_id(target_id) is not None
+        ):
+            graph_path = snapshot.find_path(
+                target_id,
+                source_id,
+                kinds={edge_kind},
+            )
+            if graph_path is not None:
+                code = (
+                    "dependency_cycle"
+                    if edge_kind is EdgeKind.DEPENDS_ON
+                    else "decomposition_cycle"
+                )
+                diagnostics.append(
+                    _diagnostic(
+                        code,
+                        f"{edge_kind.value} relations contain a cycle",
+                        details=_cycle_details(source_id, target_id, graph_path),
+                    )
+                )
+                cycle_reported.add(edge_kind)
+
+    if source_kind is NodeKind.RUN and instance_count != 1:
+        diagnostics.append(
+            _diagnostic(
+                "invalid_instance_of_count",
+                "run must have exactly one instance_of relation",
+                path=record.path,
+                node_id=source_id,
+                field="relations",
+            )
+        )
+    if (
+        source_kind is NodeKind.EVIDENCE
+        and project.config.policies.require_evidence_provenance
+        and provenance_count == 0
+    ):
+        diagnostics.append(
+            _diagnostic(
+                "evidence_provenance_required",
+                "evidence requires a derived_from relation",
+                path=record.path,
+                node_id=source_id,
+                field="relations",
+            )
+        )
+    if source_kind is NodeKind.ASSESSMENT:
+        if assesses_count == 0:
+            diagnostics.append(
+                _diagnostic(
+                    "assessment_target_required",
+                    "assessment requires an assesses relation",
+                    path=record.path,
+                    node_id=source_id,
+                    field="relations",
+                )
+            )
+        if basis_count == 0:
+            diagnostics.append(
+                _diagnostic(
+                    "assessment_basis_required",
+                    "assessment requires at least one based_on relation",
+                    path=record.path,
+                    node_id=source_id,
+                    field="relations",
+                )
+            )
+
+    if (
+        record.metadata.get("status") == "archived"
+        and snapshot._node_by_id(source_id) is not None
+    ):
+        for edge in snapshot.incoming(source_id):
+            if edge.source == source_id:
+                continue
+            owner = snapshot._node_by_id(edge.source)
+            diagnostics.append(
+                _diagnostic(
+                    "archived_target",
+                    "relation targets an archived node",
+                    path=(
+                        owner.path.relative_to(project.root)
+                        if owner is not None
+                        else None
+                    ),
+                    node_id=edge.source,
+                    edge_id=edge.id,
+                    field="relations",
+                    severity=DiagnosticSeverity.WARNING,
+                )
+            )
+
+
+def _validate_candidate_against_snapshot(
+    project: DiscoveredProject,
+    snapshot: GraphSnapshot,
+    record: _Record,
+    diagnostics: list[Diagnostic],
+) -> tuple[Diagnostic, ...]:
+    _validate_candidate_uniqueness(project, snapshot, record, diagnostics)
+    _validate_candidate_relations(project, snapshot, record, diagnostics)
+    return _sorted_diagnostics(diagnostics)
+
+
 def validate_candidate_node(
     project: DiscoveredProject,
     *,
     path: Path,
     metadata: Mapping[str, Any],
+    snapshot: GraphSnapshot | None = None,
 ) -> tuple[Diagnostic, ...]:
     """Validate an in-memory node as a project addition or path replacement."""
 
     relative_path = path.relative_to(project.root)
     diagnostics: list[Diagnostic] = []
+    record = _Record(
+        path=relative_path,
+        metadata=dict(metadata),
+    )
+    _validate_structural(record, diagnostics)
+    if snapshot is not None:
+        return _validate_candidate_against_snapshot(
+            project,
+            snapshot,
+            record,
+            diagnostics,
+        )
+
     records = _load_records(
         project,
         diagnostics,
         exclude_path=relative_path,
     )
-    record = _Record(
-        path=relative_path,
-        metadata=dict(metadata),
-    )
     records.append(record)
-    _validate_structural(record, diagnostics)
     return _validate_records(project, records, diagnostics)
 
 
