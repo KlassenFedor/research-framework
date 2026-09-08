@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -30,7 +30,7 @@ def test_second_project_open_reuses_persistent_metadata_index(
 ) -> None:
     cold = Project.open(example_project)
     expected_ids = tuple(node.id for node in cold.snapshot().list_nodes())
-    cache_path = example_project / ".research-cache" / "index-v1.json"
+    cache_path = example_project / ".research-cache" / "index-v3.sqlite3"
     assert cache_path.is_file()
     assert (cache_path.parent / ".gitignore").read_text(encoding="utf-8") == "*\n"
 
@@ -74,15 +74,17 @@ def test_corrupt_index_is_ignored_and_atomically_rebuilt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     Project.open(example_project)
-    cache_path = example_project / ".research-cache" / "index-v1.json"
-    cache_path.write_text("{not valid json", encoding="utf-8")
+    cache_path = example_project / ".research-cache" / "index-v3.sqlite3"
+    cache_path.write_bytes(b"this is not a database")
     decoded = _count_header_decodes(monkeypatch)
 
     reopened = Project.open(example_project)
 
     assert len(decoded) == 11
     assert len(reopened.snapshot().list_nodes()) == 11
-    assert json.loads(cache_path.read_text(encoding="utf-8"))["cache_version"] == 1
+    with sqlite3.connect(cache_path) as rebuilt:
+        stored = dict(rebuilt.execute("SELECT key, value FROM meta").fetchall())
+    assert stored["cache_version"] == "3"
 
 
 @pytest.mark.contract
@@ -92,15 +94,23 @@ def test_index_checksum_rejects_syntactically_valid_tampering(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     Project.open(example_project)
-    cache_path = example_project / ".research-cache" / "index-v1.json"
-    cached = json.loads(cache_path.read_text(encoding="utf-8"))
-    cached["entries"][0]["metadata"]["title"] = "Tampered cache title"
-    cache_path.write_text(json.dumps(cached), encoding="utf-8")
+    cache_path = example_project / ".research-cache" / "index-v3.sqlite3"
+    with sqlite3.connect(cache_path) as tampered:
+        row = tampered.execute("SELECT path, metadata FROM nodes LIMIT 1").fetchone()
+        edited = row[1].replace('"title":"', '"title":"Tampered ')
+        # Valid SQL, valid JSON, and a checksum that no longer describes the row.
+        tampered.execute(
+            "UPDATE nodes SET metadata = ? WHERE path = ?", (edited, row[0])
+        )
     decoded = _count_header_decodes(monkeypatch)
 
-    Project.open(example_project)
+    reopened = Project.open(example_project)
 
     assert len(decoded) == 11
+    assert all(
+        not node.title.startswith("Tampered")
+        for node in reopened.snapshot().list_nodes()
+    )
 
 
 @pytest.mark.contract
@@ -129,7 +139,7 @@ def test_cached_metadata_never_hides_a_new_validation_error(
 
 @pytest.mark.contract
 @pytest.mark.integration
-def test_project_validate_always_reads_source_files_instead_of_trusting_index(
+def test_project_validate_reuses_the_index_for_unchanged_files(
     example_project: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -138,12 +148,28 @@ def test_project_validate_always_reads_source_files_instead_of_trusting_index(
 
     assert project.validate() == ()
 
-    assert len(decoded) == 11
+    assert decoded == []
 
 
 @pytest.mark.contract
 @pytest.mark.integration
-def test_warm_open_decodes_only_a_newly_created_node(
+def test_full_validate_reads_every_source_file_and_agrees_with_the_fast_path(
+    example_project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = Project.open(example_project)
+    indexed = project.validate()
+    decoded = _count_header_decodes(monkeypatch)
+
+    full = project.validate(full=True)
+
+    assert len(decoded) == 11
+    assert full == indexed
+
+
+@pytest.mark.contract
+@pytest.mark.integration
+def test_creating_a_node_leaves_the_index_ready_for_the_next_open(
     example_project: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -156,10 +182,12 @@ def test_warm_open_decodes_only_a_newly_created_node(
 
     reopened = Project.open(example_project)
 
-    assert decoded == [created.path]
+    # The mutation recorded what it wrote, so reopening reads no Markdown at all.
+    assert decoded == []
     assert reopened.snapshot().get_node(created.id).statement == (
         "The cache is incremental."
     )
+    assert reopened.snapshot().get_node(created.id).body == created.body
 
 
 @pytest.mark.contract

@@ -7,6 +7,7 @@ import tempfile
 import time
 import unicodedata
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, fields
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,7 +37,21 @@ from research_framework.storage.discovery import (
     discover_node_files,
     discover_project,
 )
-from research_framework.storage.loader import parse_edges, parse_node
+from research_framework.storage.index_cache import (
+    CODEC_VERSION,
+    CachedNodeRecord,
+    FileFingerprint,
+    load_index,
+    lookup_record,
+    mark_canonical,
+    update_index_entry,
+)
+from research_framework.storage.loader import (
+    LazyMarkdownBody,
+    parse_edges,
+    parse_node,
+    parse_node_metadata,
+)
 from research_framework.storage.markdown_codec import DecodedMarkdown, MarkdownCodec
 from research_framework.storage.yaml_codec import dump_restricted_yaml
 
@@ -136,15 +151,39 @@ def _plain(value: Any) -> Any:
     return value
 
 
+def _node_from_record(record: CachedNodeRecord, path: Path) -> Node | None:
+    """Rebuild one node from an index entry, or give up and let the caller reread."""
+
+    node_id = record.metadata.get("id")
+    if not isinstance(node_id, str):
+        return None
+    try:
+        return parse_node_metadata(
+            record.metadata,
+            path=path,
+            revision=record.revision,
+            body=LazyMarkdownBody(path, record.body_offset, record.revision, node_id),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 class Project:
     """Application service shared by the Python API and presentation adapters."""
 
-    def __init__(self, discovered: DiscoveredProject, snapshot: GraphSnapshot) -> None:
+    def __init__(
+        self,
+        discovered: DiscoveredProject,
+        snapshot: GraphSnapshot,
+        diagnostics: tuple[Diagnostic, ...] = (),
+    ) -> None:
         self._discovered = discovered
         self._snapshot = snapshot
         self._snapshot_shared = False
         self._codec = MarkdownCodec()
         self._last_diagnostics: tuple[Diagnostic, ...] = ()
+        # What validation said about the state this instance was built from.
+        self._validated_diagnostics = diagnostics
 
     @classmethod
     def open(
@@ -163,7 +202,7 @@ class Project:
         if any(item.severity is DiagnosticSeverity.ERROR for item in diagnostics):
             raise ValidationFailed(diagnostics)
         assert snapshot is not None
-        return cls(discovered, snapshot)
+        return cls(discovered, snapshot, diagnostics)
 
     @classmethod
     def init(
@@ -201,6 +240,45 @@ class Project:
         )
         return cls.open(target)
 
+    @classmethod
+    def read_node(
+        cls,
+        path: Path,
+        reference: str,
+        *,
+        progress: ProgressCallback | None = None,
+    ) -> Node:
+        """Read one node without loading or validating the rest of the graph.
+
+        Showing a single node used to cost a full read of the vault, because the
+        only way to find a node was to build the whole graph first. The index
+        answers the same question directly, and the node it names is re-checked
+        against the file on disk before being trusted.
+
+        The trade-off is deliberate and narrow: this returns a node that was
+        structurally valid when last decoded, and says nothing about the rest of
+        the graph. Whether the graph as a whole still holds together is what
+        ``validate`` is for.
+        """
+
+        discovered = discover_project(path)
+        record, ambiguous = lookup_record(discovered, reference)
+        if ambiguous:
+            raise AmbiguousReference(reference, ambiguous)
+        if record is not None and record.structural_ok:
+            node_path = discovered.root / record.path
+            try:
+                fingerprint = FileFingerprint.from_path(node_path)
+            except OSError:
+                fingerprint = None
+            if fingerprint == record.fingerprint:
+                node = _node_from_record(record, node_path)
+                if node is not None:
+                    return node
+        # Anything the index cannot answer for is answered the long way.
+        project = cls.open(path, progress=progress)
+        return project.snapshot().get_node(reference)
+
     def snapshot(self) -> GraphSnapshot:
         self._snapshot_shared = True
         return self._snapshot
@@ -218,10 +296,18 @@ class Project:
         self,
         *,
         progress: ProgressCallback | None = None,
+        full: bool = False,
     ) -> tuple[Diagnostic, ...]:
+        """Validate the project on disk.
+
+        Unchanged files are taken from the derived index, which is keyed on the
+        file's size, inode and timestamps. ``full=True`` ignores the index and
+        decodes every file instead; both paths must report the same diagnostics.
+        """
+
         from research_framework.validation import validate_project
 
-        return validate_project(self.root, progress=progress)
+        return validate_project(self.root, progress=progress, use_index=not full)
 
     def format(
         self,
@@ -237,12 +323,15 @@ class Project:
         """
 
         self._last_diagnostics = ()
-        diagnostics = self.validate(progress=progress)
-        if any(item.severity is DiagnosticSeverity.ERROR for item in diagnostics):
-            raise ValidationFailed(diagnostics)
-
         paths = discover_node_files(self._discovered)
         candidates: list[_FormatCandidate] = []
+        cached = load_index(self._discovered)
+        verdicts: list[tuple[Path, FileFingerprint, bool]] = []
+        # Opening this project validated it, and the walk below establishes
+        # whether the vault still looks the way it did then. Revalidating before
+        # knowing that would repeat a whole pass to reach the same answer.
+        unchanged_since_open = len(cached) == len(paths)
+        diagnostics = self._validated_diagnostics
         notify_progress(
             progress,
             phase="formatting",
@@ -252,12 +341,40 @@ class Project:
         )
         for processed, path in enumerate(paths, start=1):
             self._safe_target(path)
+            relative_path = path.relative_to(self._discovered.root)
+            entry = cached.get(relative_path)
+            fingerprint: FileFingerprint | None = None
+            if (
+                entry is not None
+                and entry.is_canonical
+                and (entry.codec_version == CODEC_VERSION)
+            ):
+                try:
+                    fingerprint = FileFingerprint.from_path(path)
+                except OSError as error:
+                    raise StorageError(
+                        f"cannot read node before formatting: {path}"
+                    ) from error
+                if fingerprint == entry.fingerprint:
+                    # This exact content was serialized and compared before, and
+                    # by the same writer. Reading it again can only agree.
+                    notify_progress(
+                        progress,
+                        phase="formatting",
+                        current=processed,
+                        total=len(paths),
+                        message="Checking canonical formatting",
+                    )
+                    continue
             try:
+                fingerprint = FileFingerprint.from_path(path)
                 original = path.read_bytes()
             except OSError as error:
                 raise StorageError(
                     f"cannot read node before formatting: {path}"
                 ) from error
+            if entry is None or entry.fingerprint != fingerprint:
+                unchanged_since_open = False
             try:
                 text = original.decode("utf-8")
             except UnicodeDecodeError as error:
@@ -266,6 +383,7 @@ class Project:
             formatted = self._codec.encode(document).encode("utf-8")
             # Prepare and parse every output before touching any destination.
             self._codec.decode(formatted.decode("utf-8"), path=path)
+            verdicts.append((relative_path, fingerprint, formatted == original))
             if formatted == original:
                 notify_progress(
                     progress,
@@ -292,12 +410,20 @@ class Project:
                 message="Checking canonical formatting",
             )
 
+        if not unchanged_since_open:
+            # Something differs from the validated state, so the earlier verdict
+            # no longer covers this vault and has to be earned again.
+            diagnostics = self.validate(progress=progress)
+        if any(item.severity is DiagnosticSeverity.ERROR for item in diagnostics):
+            raise ValidationFailed(diagnostics)
+
         result = FormatResult(
             checked_files=len(paths),
             changed_paths=tuple(candidate.path for candidate in candidates),
             applied=not check and bool(candidates),
         )
         if check:
+            mark_canonical(self._discovered, verdicts)
             self._last_diagnostics = diagnostics
             return result
 
@@ -323,6 +449,19 @@ class Project:
                 self._refresh()
             else:
                 self._refresh(progress=progress)
+            # The refresh has re-read what was written, so the index now holds
+            # the new fingerprints and can be told that those bytes are canonical.
+            written_verdicts: list[tuple[Path, FileFingerprint, bool]] = []
+            for candidate in written:
+                with suppress(OSError):
+                    written_verdicts.append(
+                        (
+                            candidate.path.relative_to(self._discovered.root),
+                            FileFingerprint.from_path(candidate.path),
+                            True,
+                        )
+                    )
+            mark_canonical(self._discovered, verdicts + written_verdicts)
         except Exception:
             rollback_errors: list[Exception] = []
             for candidate in reversed(written):
@@ -362,6 +501,7 @@ class Project:
         assert snapshot is not None
         self._snapshot = snapshot
         self._snapshot_shared = False
+        self._validated_diagnostics = diagnostics
 
     def _safe_target(self, target: Path) -> None:
         vault = self._discovered.vault.resolve()
@@ -411,6 +551,36 @@ class Project:
         else:
             self._snapshot._replace_node_in_place(node, edges)
         self._snapshot_shared = False
+        self._record_in_index(document, node.revision)
+
+    def _record_in_index(self, document: DecodedMarkdown, revision: str) -> None:
+        """Keep the derived index current for the one file that just changed.
+
+        Everything recorded here was established while writing: the candidate was
+        structurally validated before the write, and the bytes on disk are what
+        the canonical writer produced. Failing to update the index costs a reread
+        later and nothing else, so a failure here is not worth raising.
+        """
+
+        try:
+            fingerprint = FileFingerprint.from_path(document.path)
+        except OSError:
+            return
+        # The encoder writes the front matter first, so the body begins exactly
+        # that far into the document.
+        encoded_length = len(self._codec.encode(document))
+        update_index_entry(
+            self._discovered,
+            CachedNodeRecord(
+                path=document.path.relative_to(self._discovered.root),
+                fingerprint=fingerprint,
+                revision=revision,
+                body_offset=encoded_length - len(document.body),
+                metadata=dict(document.metadata),
+                structural_ok=True,
+                is_canonical=True,
+            ),
+        )
 
     def _atomic_write_bytes(self, target: Path, content: bytes) -> None:
         self._safe_target(target)

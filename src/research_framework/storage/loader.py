@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -33,13 +34,24 @@ COMMON_FIELDS = {
 }
 
 
+# A graph has far fewer actors than nodes, and every node names two of them.
+# Handing out one shared instance per distinct actor removes a per-node object
+# without changing anything observable, since Actor is frozen.
+_ACTORS: dict[tuple[str, str, str | None, str | None], Actor] = {}
+
+
 def parse_actor(value: Mapping[str, Any]) -> Actor:
-    return Actor(
-        kind=ActorKind(value["kind"]),
-        id=value["id"],
-        run_id=value.get("run_id"),
-        model=value.get("model"),
-    )
+    key = (value["kind"], value["id"], value.get("run_id"), value.get("model"))
+    actor = _ACTORS.get(key)
+    if actor is None:
+        actor = Actor(
+            kind=ActorKind(key[0]),
+            id=sys.intern(key[1]),
+            run_id=key[2],
+            model=key[3],
+        )
+        _ACTORS[key] = actor
+    return actor
 
 
 def parse_datetime(value: str) -> datetime:
@@ -92,7 +104,9 @@ def parse_node_metadata(
         title=metadata["title"],
         status=NodeStatus(metadata["status"]),
         summary=metadata.get("summary"),
-        tags=tuple(metadata.get("tags", ())),
+        # Tags repeat across the whole graph; aliases do not, but interning a
+        # unique string only costs the lookup that proved it unique.
+        tags=tuple(sys.intern(tag) for tag in metadata.get("tags", ())),
         aliases=tuple(metadata.get("aliases", ())),
         created_at=parse_datetime(metadata["created_at"]),
         created_by=parse_actor(metadata["created_by"]),

@@ -541,6 +541,11 @@ def _build_parser() -> Parser:
 
     validate = commands.add_parser("validate")
     validate.add_argument("--json", action="store_true")
+    validate.add_argument(
+        "--full",
+        action="store_true",
+        help="ignore the derived index and decode every node file",
+    )
 
     formatting = commands.add_parser("format")
     formatting.add_argument("--check", action="store_true")
@@ -567,7 +572,7 @@ def _handle(
         return 0
 
     if args.command == "validate":
-        diagnostics = validate_project(cwd, progress=progress)
+        diagnostics = validate_project(cwd, progress=progress, use_index=not args.full)
         errors = [
             item for item in diagnostics if item.severity is DiagnosticSeverity.ERROR
         ]
@@ -628,15 +633,18 @@ def _handle(
         )
         return 0
 
+    if args.command == "node" and args.node_command == "show":
+        # Showing one node does not need the rest of the graph built first.
+        node = Project.read_node(cwd, args.reference, progress=progress)
+        data = _node_to_dict(node)
+        _success(data) if args.json else print(render_node(node))
+        return 0
+
     project = Project.open(cwd, progress=progress)
     graph = project.snapshot()
 
     if args.command == "node":
-        if args.node_command == "show":
-            node = graph.get_node(args.reference)
-            data = _node_to_dict(node)
-            _success(data) if args.json else print(render_node(node))
-        elif args.node_command == "list":
+        if args.node_command == "list":
             nodes = graph.list_nodes(
                 kind=args.kind,
                 status=args.status,

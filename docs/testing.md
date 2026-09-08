@@ -19,7 +19,9 @@
 | Validation | Syntax, structural, referential, semantic и graph diagnostics |
 | Storage | Candidate prevalidation, atomic write/rollback, revision conflict, локальность diff, защита путей |
 | Load/mutation performance | Cold open читает Node один раз; warm open не декодирует неизменившийся Markdown; body ленив; mutation не сканирует vault; copy-on-write сохраняет старые snapshots |
-| Persistent index | Zero-decode reuse, one-file invalidation, checksum/version rebuild, явный validate обходит кеш |
+| Restricted YAML fast path | Читатель и писатель канонического front matter совпадают с PyYAML или отказываются; 2 000 случайных документов, включая строки на границе переноса |
+| Persistent index | Zero-decode reuse, one-file invalidation, checksum/version rebuild, `validate --full` обходит кеш и даёт те же diagnostics |
+| Инкрементальные gates | Повторный `format --check` не читает Markdown, но видит переставший быть каноническим файл; чтение одного Node по индексу, включая alias, префикс, неоднозначность, правку извне и отсутствие кеша |
 | Formatting | Read-only check, canonical front matter, byte-exact body, idempotence, rollback, concurrent edits |
 | Python API | Init/open, atomic metadata/body mutations, operation diagnostics, snapshots |
 | CLI | Human/JSON warnings, stderr progress, таблицы/графы, HTML render, `$EDITOR`, body update, initial relations, stdin и exit codes |

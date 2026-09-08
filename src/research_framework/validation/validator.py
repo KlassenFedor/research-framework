@@ -25,6 +25,7 @@ from research_framework.storage.discovery import (
     discover_project,
 )
 from research_framework.storage.index_cache import (
+    CODEC_VERSION,
     CachedNodeRecord,
     FileFingerprint,
     load_index,
@@ -1140,9 +1141,17 @@ def _load_records(
     diagnostics: list[Diagnostic],
     *,
     exclude_path: Path | None = None,
-    retain_snapshot_data: bool = False,
     progress: ProgressCallback | None = None,
+    use_index: bool = True,
 ) -> list[_Record]:
+    """Read every node, reusing the index for files that have not changed.
+
+    A cached entry is believed only while its fingerprint still matches the file
+    on disk, so a changed node is always decoded again. ``use_index=False`` is
+    the escape hatch that ignores the cache entirely and reads every source file,
+    which is what makes the cache an optimisation rather than a second truth.
+    """
+
     codec = MarkdownCodec()
     records: list[_Record] = []
     notify_progress(
@@ -1154,8 +1163,11 @@ def _load_records(
     )
     node_paths = discover_node_files(project)
     relative_paths = {path.relative_to(project.root) for path in node_paths}
-    cached_records = load_index(project) if retain_snapshot_data else {}
-    cache_dirty = retain_snapshot_data and set(cached_records) != relative_paths
+    cached_records = load_index(project) if use_index else {}
+    cache_dirty = set(cached_records) != relative_paths
+    # An excluded path would leave a hole in the index, so a run that skips a
+    # file describes the vault incompletely and must not be written back.
+    writable = exclude_path is None
     refreshed_cache: list[CachedNodeRecord] = []
     notify_progress(
         progress,
@@ -1204,12 +1216,18 @@ def _load_records(
         if cached is not None and cached.fingerprint == fingerprint:
             record = _Record(
                 path=relative_path,
-                metadata=dict(cached.metadata),
+                metadata=cached.metadata,
                 body_offset=cached.body_offset,
                 revision=cached.revision,
             )
+            structural_ok = cached.structural_ok
+            is_canonical = cached.is_canonical
+            codec_version = cached.codec_version
         else:
-            cache_dirty = cache_dirty or retain_snapshot_data
+            cache_dirty = True
+            structural_ok = False
+            is_canonical = None
+            codec_version = CODEC_VERSION
             try:
                 for _attempt in range(3):
                     raw = node_path.read_bytes()
@@ -1253,25 +1271,31 @@ def _load_records(
             record = _Record(
                 path=relative_path,
                 metadata=dict(header.metadata),
-                body_offset=header.body_offset if retain_snapshot_data else None,
-                revision=(
-                    hashlib.sha256(raw).hexdigest() if retain_snapshot_data else None
-                ),
+                body_offset=header.body_offset,
+                revision=hashlib.sha256(raw).hexdigest(),
             )
         records.append(record)
-        _validate_structural(record, diagnostics)
-        if (
-            retain_snapshot_data
-            and record.body_offset is not None
-            and record.revision is not None
-        ):
+        if structural_ok:
+            # The same metadata passed these checks when it was last decoded, and
+            # they depend on nothing else, so there is nothing left to find.
+            proven = True
+        else:
+            before = len(diagnostics)
+            _validate_structural(record, diagnostics)
+            proven = len(diagnostics) == before
+            if proven:
+                cache_dirty = True
+        if record.body_offset is not None and record.revision is not None:
             refreshed_cache.append(
                 CachedNodeRecord(
                     path=relative_path,
                     fingerprint=fingerprint,
                     revision=record.revision,
                     body_offset=record.body_offset,
-                    metadata=dict(record.metadata),
+                    metadata=record.metadata,
+                    structural_ok=proven,
+                    is_canonical=is_canonical,
+                    codec_version=codec_version,
                 )
             )
         notify_progress(
@@ -1281,7 +1305,7 @@ def _load_records(
             total=len(node_paths),
             message="Loading research nodes",
         )
-    if retain_snapshot_data and cache_dirty:
+    if writable and cache_dirty:
         write_index(project, refreshed_cache)
     return records
 
@@ -1686,10 +1710,20 @@ def validate_project(
     path: Path,
     *,
     progress: ProgressCallback | None = None,
+    use_index: bool = True,
 ) -> tuple[Diagnostic, ...]:
+    """Validate a project on disk.
+
+    ``use_index=False`` reads and decodes every source file, ignoring the derived
+    index. It is the answer to "but what if the cache is lying?", and it must
+    always produce exactly the same diagnostics as the default path.
+    """
+
     project = discover_project(path)
     diagnostics: list[Diagnostic] = []
-    records = _load_records(project, diagnostics, progress=progress)
+    records = _load_records(
+        project, diagnostics, progress=progress, use_index=use_index
+    )
     notify_progress(
         progress,
         phase="validating",
@@ -1716,12 +1750,7 @@ def validate_and_load_snapshot(
     """Validate and build a snapshot from one read/decode pass."""
 
     diagnostics: list[Diagnostic] = []
-    records = _load_records(
-        project,
-        diagnostics,
-        retain_snapshot_data=True,
-        progress=progress,
-    )
+    records = _load_records(project, diagnostics, progress=progress)
     notify_progress(
         progress,
         phase="validating",

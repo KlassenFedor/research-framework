@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import math
-import re
 from collections.abc import Mapping
 from typing import Any
 
 import yaml
 from yaml.events import AliasEvent, CollectionStartEvent, NodeEvent, ScalarEvent
 from yaml.nodes import MappingNode, ScalarNode
+
+from .fast_yaml import (
+    DISABLED_IMPLICIT_TAGS,
+    STRICT_BOOL_FIRST,
+    STRICT_BOOL_PATTERN,
+    dump_canonical,
+    parse_canonical,
+)
 
 
 class RestrictedYamlError(ValueError):
@@ -59,17 +66,13 @@ for initial, resolvers in list(RestrictedLoader.yaml_implicit_resolvers.items())
     RestrictedLoader.yaml_implicit_resolvers[initial] = [
         (tag, pattern)
         for tag, pattern in resolvers
-        if tag
-        not in {
-            "tag:yaml.org,2002:bool",
-            "tag:yaml.org,2002:timestamp",
-        }
+        if tag not in DISABLED_IMPLICIT_TAGS
     ]
 
 RestrictedLoader.add_implicit_resolver(
     "tag:yaml.org,2002:bool",
-    re.compile(r"^(?:true|false)$", re.IGNORECASE),
-    list("tTfF"),
+    STRICT_BOOL_PATTERN,
+    list(STRICT_BOOL_FIRST),
 )
 
 
@@ -134,6 +137,11 @@ def _ensure_json_compatible(value: Any, path: str = "$") -> None:
 
 
 def load_restricted_yaml(text: str) -> dict[str, Any]:
+    fast = parse_canonical(text)
+    if fast is not None:
+        # The fast reader accepts a strict subset of what follows, and produces
+        # only JSON-compatible values, so neither check below can add anything.
+        return fast
     try:
         value = yaml.load(text, Loader=RestrictedLoader)
     except RestrictedYamlError:
@@ -159,6 +167,9 @@ def load_restricted_yaml(text: str) -> dict[str, Any]:
 def dump_restricted_yaml(value: Mapping[str, Any]) -> str:
     plain = dict(value)
     _ensure_json_compatible(plain)
+    fast = dump_canonical(plain)
+    if fast is not None:
+        return fast
     return yaml.dump(
         plain,
         Dumper=RestrictedDumper,

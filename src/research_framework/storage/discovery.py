@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
@@ -142,15 +143,41 @@ def discover_project(start: Path) -> DiscoveredProject:
 
 
 def discover_node_files(project: DiscoveredProject) -> tuple[Path, ...]:
-    files: list[Path] = []
-    for path in project.vault.rglob("*.md"):
-        if path.name == "PROJECT.md" or path.is_symlink() or not path.is_file():
-            continue
+    """List the node files in the vault, in a deterministic order.
+
+    Directory entries carry their own type, so walking with :func:`os.scandir`
+    answers "file or directory, and is it a link?" without a further system call
+    per entry. Refusing to descend into a symlinked directory is what keeps the
+    walk inside the vault: no entry reached this way can resolve outside it, so
+    no path has to be resolved to find that out.
+    """
+
+    names: list[str] = []
+    root = str(project.vault)
+    pending = [root]
+    while pending:
+        directory = pending.pop()
         try:
-            resolved = path.resolve()
+            entries = os.scandir(directory)
         except OSError:
             continue
-        if not resolved.is_relative_to(project.vault):
-            continue
-        files.append(path)
-    return tuple(sorted(files))
+        with entries:
+            for entry in entries:
+                try:
+                    if entry.is_symlink():
+                        continue
+                    if entry.is_dir():
+                        pending.append(entry.path)
+                        continue
+                    if not entry.name.endswith(".md") or entry.name == "PROJECT.md":
+                        continue
+                    if not entry.is_file():
+                        continue
+                except OSError:
+                    continue
+                names.append(entry.path)
+    # Order by path segment, which is how Path compares. Sorting the raw strings
+    # would disagree whenever a directory name is a prefix of another and the
+    # next character sorts below the separator.
+    names.sort(key=lambda name: name.split(os.sep))
+    return tuple(Path(name) for name in names)

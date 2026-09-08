@@ -115,3 +115,40 @@ def test_discovery_does_not_follow_symlinked_files_outside_vault(
     discovered = discover_project(example_project)
 
     assert link not in discover_node_files(discovered)
+
+
+@pytest.mark.contract
+def test_discovery_orders_paths_the_way_path_comparison_does(
+    example_project: Path,
+) -> None:
+    # A directory whose name is a prefix of another, with a following character
+    # below the path separator, is where raw string ordering and Path ordering
+    # disagree.
+    vault = example_project / "research"
+    (vault / "questions-extra").mkdir()
+    (vault / "questions-extra" / "note.md").write_text(
+        "---\nid: x\n---\n", encoding="utf-8"
+    )
+    discovered = discover_project(example_project)
+
+    files = discover_node_files(discovered)
+
+    assert list(files) == sorted(files)
+
+
+@pytest.mark.contract
+def test_discovery_does_not_descend_into_a_symlinked_directory(
+    example_project: Path, tmp_path: Path
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "smuggled.md").write_text("---\nid: unsafe\n---\n", encoding="utf-8")
+    link = example_project / "research" / "linked"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("platform does not support symlinks")
+
+    discovered = discover_project(example_project)
+
+    assert all("smuggled" not in path.name for path in discover_node_files(discovered))
