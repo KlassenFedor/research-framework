@@ -10,6 +10,13 @@ from jsonschema import Draft202012Validator, FormatChecker
 
 from research_framework import node_schema, project_schema
 from research_framework.domain.errors import StorageError
+from research_framework.domain.fields import (
+    IMMUTABLE_FIELDS,
+    SPECIAL_FIELDS,
+    allowed_update_fields,
+    required_fields,
+    schema_fields,
+)
 from research_framework.storage.discovery import discover_project
 from research_framework.storage.markdown_codec import MarkdownCodec
 from research_framework.storage.yaml_codec import (
@@ -188,3 +195,33 @@ def test_project_discovery_rejects_values_rejected_by_project_schema(
 
     with pytest.raises(StorageError, match=message):
         discover_project(example_project)
+
+
+def _schema_kind(kind: str) -> dict[str, Any]:
+    branches: list[dict[str, Any]] = node_schema()["$defs"][kind]["allOf"]
+    return next(branch for branch in branches if "$ref" not in branch)
+
+
+def _schema_common() -> dict[str, Any]:
+    common: dict[str, Any] = node_schema()["$defs"]["common"]
+    return common
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize("kind", sorted(SPECIAL_FIELDS))
+def test_shared_field_table_matches_the_json_schema(kind: str) -> None:
+    branch = _schema_kind(kind)
+    declared = set(_schema_common()["properties"]) | set(branch["properties"])
+    required = set(_schema_common()["required"]) | set(branch["required"])
+
+    assert schema_fields(kind) == declared
+    assert required_fields(kind) == required
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize("kind", sorted(SPECIAL_FIELDS))
+def test_every_optional_schema_field_can_be_added_by_a_patch(kind: str) -> None:
+    optional = schema_fields(kind) - required_fields(kind) - IMMUTABLE_FIELDS
+
+    assert optional <= allowed_update_fields(kind)
+    assert not allowed_update_fields(kind) & IMMUTABLE_FIELDS

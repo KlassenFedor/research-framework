@@ -11,7 +11,9 @@ from research_framework import (
     HypothesisDraft,
     NodeStatus,
     Project,
+    RelationDraft,
     RevisionConflict,
+    RunDraft,
     StorageError,
     ValidationFailed,
 )
@@ -370,3 +372,113 @@ def test_create_hypothesis_respects_falsification_policy(example_project: Path) 
             ),
             actor=Actor.human("fedor"),
         )
+
+
+def _running_run(project: Project) -> str:
+    run = project.create_node(
+        RunDraft(
+            title="Reproduction",
+            started_at="2026-08-28T18:00:00+07:00",
+            outcome="running",
+        ),
+        actor=Actor.human("fedor"),
+        initial_relations=(
+            RelationDraft(
+                kind=EdgeKind.INSTANCE_OF,
+                target=NODE_IDS["experiment"],
+            ),
+        ),
+    )
+    return run.id
+
+
+@pytest.mark.contract
+@pytest.mark.integration
+def test_running_run_is_finished_by_a_single_atomic_patch(
+    example_project: Path,
+) -> None:
+    project = Project.open(example_project)
+    run_id = _running_run(project)
+    run = project.snapshot().get_node(run_id)
+    assert "finished_at" not in run.data
+
+    finished = project.update_node(
+        run_id,
+        patch={
+            "outcome": "completed",
+            "finished_at": "2026-08-28T18:01:00+07:00",
+        },
+        expected_revision=run.revision,
+        actor=Actor.human("fedor"),
+    )
+
+    assert finished.data["outcome"] == "completed"
+    assert finished.data["finished_at"] == "2026-08-28T18:01:00+07:00"
+    assert finished.updated_at > run.updated_at
+    assert project.validate() == ()
+
+
+@pytest.mark.contract
+@pytest.mark.integration
+@pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
+def test_every_terminal_outcome_can_be_reached_from_running(
+    example_project: Path,
+    outcome: str,
+) -> None:
+    project = Project.open(example_project)
+    run_id = _running_run(project)
+    run = project.snapshot().get_node(run_id)
+
+    finished = project.update_node(
+        run_id,
+        patch={
+            "outcome": outcome,
+            "finished_at": "2026-08-28T18:01:00+07:00",
+        },
+        expected_revision=run.revision,
+        actor=Actor.human("fedor"),
+    )
+
+    assert finished.data["outcome"] == outcome
+    assert project.validate() == ()
+
+
+@pytest.mark.contract
+@pytest.mark.integration
+def test_absent_optional_field_is_added_by_update_for_any_kind(
+    example_project: Path,
+) -> None:
+    project = Project.open(example_project)
+    node = project.snapshot().get_node(NODE_IDS["challenging_evidence"])
+    assert "collected_at" not in node.data
+
+    updated = project.update_node(
+        node.id,
+        patch={"collected_at": "2026-08-28T18:00:00+07:00"},
+        expected_revision=node.revision,
+        actor=Actor.human("fedor"),
+    )
+
+    assert updated.data["collected_at"] == "2026-08-28T18:00:00+07:00"
+    assert project.validate() == ()
+
+
+@pytest.mark.contract
+@pytest.mark.integration
+def test_update_still_rejects_a_field_the_schema_does_not_allow_for_the_kind(
+    example_project: Path,
+) -> None:
+    project = Project.open(example_project)
+    node = project.snapshot().get_node(NODE_IDS["question"])
+    before = node.path.read_bytes()
+
+    with pytest.raises(ValidationFailed) as raised:
+        project.update_node(
+            node.id,
+            patch={"finished_at": "2026-08-28T18:01:00+07:00"},
+            expected_revision=node.revision,
+            actor=Actor.human("fedor"),
+        )
+
+    assert raised.value.diagnostics[0].code == "unknown_field"
+    assert node.path.read_bytes() == before

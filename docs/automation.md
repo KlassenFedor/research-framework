@@ -234,10 +234,11 @@ rf node update REF --from-json update.json --json
 
 `patch` и `body` необязательны по отдельности, но хотя бы одно из них должно
 присутствовать. `body` находится на верхнем уровне envelope, а не внутри
-metadata patch; это строка, где `""` означает пустое тело. Разрешены изменяемые
-metadata-поля существующего Node, а также `summary`, `tags`, `aliases`,
-`extensions`. Запрещены `format_version`, `id`, `kind`, `created_at`,
-`created_by` и `relations`. Status: `draft`, `active`, `closed`, `archived`.
+metadata patch; это строка, где `""` означает пустое тело. Разрешено любое
+поле, которое схема объявляет для данного `kind`, независимо от того, есть ли
+оно уже в файле: optional-поле, опущенное при создании, добавляется обычным
+patch. Запрещены `format_version`, `id`, `kind`, `created_at`, `created_by` и
+`relations`. Status: `draft`, `active`, `closed`, `archived`.
 
 Metadata и body записываются атомарно. Body-only update также обновляет
 `updated_at` и `updated_by`. Для интерактивной правки без JSON используйте:
@@ -460,7 +461,10 @@ print(run.id, run.revision)
 
 updated = project.update_node(
     run.id,
-    patch={"outcome": "completed"},
+    patch={
+        "outcome": "completed",
+        "finished_at": "2026-08-18T10:42:00+07:00",
+    },
     body="# Result\n\nRun completed successfully.\n",
     expected_revision=run.revision,
     actor=Actor.agent("runner", run_id="bench-42"),

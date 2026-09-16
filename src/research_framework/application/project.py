@@ -29,6 +29,10 @@ from research_framework.domain.errors import (
     StorageError,
     ValidationFailed,
 )
+from research_framework.domain.fields import (
+    IMMUTABLE_FIELDS,
+    allowed_update_fields,
+)
 from research_framework.domain.graph import Edge, GraphSnapshot, Node
 from research_framework.domain.nodes import NodeDraft
 from research_framework.progress import ProgressCallback, notify_progress
@@ -810,20 +814,15 @@ class Project:
         node, metadata, current_body = self._read_current(
             node_id, expected_revision=expected_revision
         )
-        immutable = {
-            "format_version",
-            "id",
-            "kind",
-            "created_at",
-            "created_by",
-            "relations",
-        }
-        if immutable.intersection(patch):
-            field = min(immutable.intersection(patch))
+        if IMMUTABLE_FIELDS.intersection(patch):
+            field = min(IMMUTABLE_FIELDS.intersection(patch))
             raise self._invalid(
                 "immutable_field", f"cannot update {field}", field=field
             )
-        allowed = set(metadata) | {"summary", "tags", "aliases", "extensions"}
+        # Allowed fields come from the schema for this kind, not from the keys
+        # the document happens to hold, so an optional field omitted at creation
+        # time can still be added later (bug-reports/005).
+        allowed = allowed_update_fields(metadata.get("kind"))
         unknown = set(patch) - allowed
         if unknown:
             field = min(unknown)

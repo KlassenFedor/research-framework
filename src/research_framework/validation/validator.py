@@ -17,6 +17,7 @@ from research_framework.domain.enums import (
     NodeKind,
     NodeStatus,
 )
+from research_framework.domain.fields import required_fields, schema_fields
 from research_framework.domain.graph import Edge, GraphSnapshot
 from research_framework.progress import ProgressCallback, notify_progress
 from research_framework.storage.discovery import (
@@ -58,58 +59,6 @@ _NODE_ID = re.compile(rf"^(?:{'|'.join(_NODE_PREFIXES.values())})-{_ULID}$")
 _EDGE_ID = re.compile(rf"^rel-{_ULID}$")
 _DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 _TIMEZONE_SUFFIX = re.compile(r"(?:Z|[+-][0-9]{2}:[0-9]{2})$")
-
-_COMMON_FIELDS = {
-    "format_version",
-    "id",
-    "kind",
-    "title",
-    "status",
-    "summary",
-    "tags",
-    "aliases",
-    "created_at",
-    "created_by",
-    "updated_at",
-    "updated_by",
-    "relations",
-    "extensions",
-}
-_SPECIAL_FIELDS: dict[str, set[str]] = {
-    "question": {"question", "scope"},
-    "hypothesis": {"statement", "falsification_criteria", "assumptions"},
-    "claim": {"statement"},
-    "experiment": {"objective", "method", "success_criteria", "protocol_version"},
-    "run": {"started_at", "finished_at", "outcome", "environment"},
-    "evidence": {"observation", "evidence_kind", "collected_at"},
-    "assessment": {"verdict", "confidence", "limitations", "review_state"},
-    "source": {"source_kind", "locator", "citation", "accessed_at"},
-    "artifact": {"locator", "media_type", "sha256", "size"},
-    "decision": {"outcome", "rationale"},
-}
-_REQUIRED_COMMON = {
-    "format_version",
-    "id",
-    "kind",
-    "title",
-    "status",
-    "created_at",
-    "created_by",
-    "updated_at",
-    "updated_by",
-}
-_REQUIRED_SPECIAL: dict[str, set[str]] = {
-    "question": {"question"},
-    "hypothesis": {"statement", "falsification_criteria"},
-    "claim": {"statement"},
-    "experiment": {"objective", "method", "success_criteria", "protocol_version"},
-    "run": {"started_at", "outcome"},
-    "evidence": {"observation", "evidence_kind"},
-    "assessment": {"verdict", "confidence", "review_state"},
-    "source": {"source_kind", "locator"},
-    "artifact": {"locator"},
-    "decision": {"outcome", "rationale"},
-}
 
 
 @dataclass(slots=True)
@@ -379,9 +328,7 @@ def _validate_structural(record: _Record, diagnostics: list[Diagnostic]) -> None
     kind_value = metadata.get("kind")
     kind = record.kind
 
-    for field in sorted(
-        _REQUIRED_COMMON | _REQUIRED_SPECIAL.get(str(kind_value), set())
-    ):
+    for field in sorted(required_fields(kind_value)):
         if field not in metadata or _is_missing(metadata.get(field)):
             diagnostics.append(
                 _diagnostic(
@@ -393,7 +340,7 @@ def _validate_structural(record: _Record, diagnostics: list[Diagnostic]) -> None
                 )
             )
 
-    allowed = _COMMON_FIELDS | _SPECIAL_FIELDS.get(str(kind_value), set())
+    allowed = schema_fields(kind_value)
     for field in sorted(set(metadata) - allowed):
         diagnostics.append(
             _diagnostic(

@@ -5,6 +5,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from research_framework.domain.fields import field_order as _field_order
+
 from .yaml_codec import RestrictedYamlError, dump_restricted_yaml, load_restricted_yaml
 
 
@@ -100,45 +102,7 @@ class MarkdownCodec:
     def encode(self, document: DecodedMarkdown) -> str:
         metadata = dict(document.metadata)
         kind = metadata.get("kind")
-        special_fields = {
-            "question": ("question", "scope"),
-            "hypothesis": ("statement", "falsification_criteria", "assumptions"),
-            "claim": ("statement",),
-            "experiment": (
-                "objective",
-                "method",
-                "success_criteria",
-                "protocol_version",
-            ),
-            "run": ("started_at", "finished_at", "outcome", "environment"),
-            "evidence": ("observation", "evidence_kind", "collected_at"),
-            "assessment": (
-                "verdict",
-                "confidence",
-                "limitations",
-                "review_state",
-            ),
-            "source": ("source_kind", "locator", "citation", "accessed_at"),
-            "artifact": ("locator", "media_type", "sha256", "size"),
-            "decision": ("outcome", "rationale"),
-        }
-        field_order = (
-            "format_version",
-            "id",
-            "kind",
-            "title",
-            "status",
-            "summary",
-            *special_fields.get(str(kind), ()),
-            "tags",
-            "aliases",
-            "created_at",
-            "created_by",
-            "updated_at",
-            "updated_by",
-            "extensions",
-            "relations",
-        )
+        field_order = _field_order(kind)
         ordered: dict[str, Any] = {}
         for field in field_order:
             if field in metadata:
